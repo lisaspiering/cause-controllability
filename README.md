@@ -1,5 +1,5 @@
-# Controllability and cause in human collaboration
-Spiering et al., 2024
+# controllability and cause in human collaboration
+Spiering et al., 2024.
 bioRxiv preprint available at: https://www.biorxiv.org/content/10.1101/2024.10.01.615833v1
 
 ## system requirements
@@ -10,7 +10,6 @@ Please install the programmes listed above, and install the required R packages 
 
 ## instruction for use
 
-## demo
-not applicable
+demo: n/a
 
 Copyright, 2025, University of Oxford. All rights reserved
