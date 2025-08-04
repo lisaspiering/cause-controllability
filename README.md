@@ -18,4 +18,4 @@ The cluster-corrected whole-brain maps shown in Fig 5 can be found in the folder
 ## demo
 The code can be used together with the data provided (see above).
 
-Copyright, 2025, University of Oxford. All rights reserved
+Copyright, 2025, Lisa Spiering. All rights reserved
