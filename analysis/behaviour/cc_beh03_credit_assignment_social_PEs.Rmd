@@ -1,0 +1,138 @@
+---
+title: "Credit assignment of social PEs to self and other"
+output: html_notebook
+---
+
+Do people assign social PEs to themselves and others in the Self-Other phase? (figure 2e)
+-> People split up PE to self other by weighing it with control
+
+```{r Setup,include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(foreach);library(doParallel); 
+
+registerDoParallel(cores=15)# for parallel computing 
+
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors; cols = out$cols;
+
+# load MRI & online data
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online
+```
+
+
+# run regressions
+```{r, include=F}
+dataB.mri$control_level_other = 1 - dataB.mri$control_level; dataB.online$control_level_other = 1 - dataB.online$control_level
+# human data
+for (sample2fit in c('mri','online')) {
+  # phase 1 / self
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars ))
+  fit.name  = paste0('fit_self_upd_PE_wdrift.p1.',sample2fit)
+  fit.vars  = list(notscale=c(),toscale=c('rate_self_upd','total_PE_signed_prev','control_level','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval() %>% dplyr::filter(phase==1,phase_trial>1,active_1after==0) %>% select(ID,game_number,phase,all_of(fit.vars$toscale),all_of(fit.vars$notscale))
+  dfT       = fit.data %>% dplyr::filter(ID==1) %>% mutate_at(fit.vars$toscale,scale)  
+  fit.model = brm(formula = rate_self_upd ~ total_PE_signed_prev * control_level + phase_trial , data=dfT,family='normal',chains=4,control=list(adapt_delta=0.9),refresh=0,prior=my.priors)  
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+  # phase 1 / other
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars ))
+  fit.name  = paste0('fit_other_upd_PE_wdrift.p1.',sample2fit)
+  fit.vars  = list(notscale=c(),toscale=c('rate_other_upd','total_PE_signed_prev','control_level_other','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval() %>% dplyr::filter(phase==1,phase_trial>1,active_1after==0) %>% select(ID,game_number,phase,all_of(fit.vars$toscale),all_of(fit.vars$notscale))
+  dfT       = fit.data %>% dplyr::filter(ID==1) %>% mutate_at(fit.vars$toscale,scale)  
+  fit.model = brm(formula = rate_other_upd ~ total_PE_signed_prev * control_level_other + phase_trial, data=dfT,family='normal',chains=4,control=list(adapt_delta=0.9),refresh=0,prior=my.priors)  
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+}
+# Active Bayesian learner
+for (sample2fit in c('mri','online')) {
+  # phase 1 / self
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars ))
+  fit.name  = paste0('fit_BLself_upd_PE_wdrift.p1.',sample2fit)
+  fit.vars  = list(notscale=c(),toscale=c('BL_self_mu_upd','BL_total_PE_signed_prev','control_level','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval() %>% dplyr::filter(phase==1,phase_trial>1,active_1after==0) %>% select(ID,game_number,phase,all_of(fit.vars$toscale),all_of(fit.vars$notscale))
+  dfT       = fit.data %>% dplyr::filter(ID==1) %>% mutate_at(fit.vars$toscale,scale)  
+  fit.model = brm(formula = BL_self_mu_upd ~ BL_total_PE_signed_prev * control_level + phase_trial , data=dfT,family='normal',chains=4,control=list(adapt_delta=0.9),refresh=0,prior=my.priors)  
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+  # phase 1 / other
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars ))
+  fit.name  = paste0('fit_BLother_upd_PE_wdrift.p1.',sample2fit)
+  fit.vars  = list(notscale=c(),toscale=c('BL_other_mu_upd','BL_total_PE_signed_prev','control_level_other','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval() %>% dplyr::filter(phase==1,phase_trial>1,active_1after==0) %>% select(ID,game_number,phase,all_of(fit.vars$toscale),all_of(fit.vars$notscale))
+  dfT       = fit.data %>% dplyr::filter(ID==1) %>% mutate_at(fit.vars$toscale,scale)  
+  fit.model = brm(formula = BL_other_mu_upd ~ BL_total_PE_signed_prev * control_level_other + phase_trial, data=dfT,family='normal',chains=4,control=list(adapt_delta=0.9),refresh=0,prior=my.priors)  
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+}
+```
+
+# load regression results
+```{r,fig.height=2.5,fig.width=6}
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='_upd_PE_wdrift.p1',full.names = T),load,.GlobalEnv)
+
+# put online and mri sample results together in one data frame
+transform4plot = function(data) {
+  if ('BL_total_PE_signed_prev' %in% names(data)) {
+    # Bayesian
+    if ('control_level' %in% names(data)) {
+      data = data %>% rename(total_PE=BL_total_PE_signed_prev,total_PE.Ctrl=`BL_total_PE_signed_prev:control_level`,Ctrl=control_level) %>% pivot_longer(cols=c('total_PE','total_PE.Ctrl','Ctrl'),values_to=beta2plot,names_to = 'regressor')
+    } else {
+      data = data %>% rename(total_PE=BL_total_PE_signed_prev,total_PE.OCtrl=`BL_total_PE_signed_prev:control_level_other`,OCtrl=control_level_other) %>% pivot_longer(cols=c('total_PE','total_PE.OCtrl','OCtrl'),values_to=beta2plot,names_to = 'regressor')
+    } 
+  } else {
+    # Participants
+    if ('control_level' %in% names(data)) {
+      data = data %>% rename(total_PE=total_PE_signed_prev,total_PE.Ctrl=`total_PE_signed_prev:control_level`,Ctrl=control_level) %>% pivot_longer(cols=c('total_PE','total_PE.Ctrl','Ctrl'),values_to=beta2plot,names_to = 'regressor')
+    } else {
+      data = data %>% rename(total_PE=total_PE_signed_prev,total_PE.OCtrl=`total_PE_signed_prev:control_level_other`,OCtrl=control_level_other) %>% pivot_longer(cols=c('total_PE','total_PE.OCtrl','OCtrl'),values_to=beta2plot,names_to = 'regressor')
+    }
+  }
+  return(data)
+}
+self2plot.p1  = rbind(
+  fit_self_upd_PE_wdrift.p1.mri[[df2plot]] %>% transform4plot() %>% mutate(Sample='MRI'),    fit_self_upd_PE_wdrift.p1.online[[df2plot]] %>% transform4plot() %>% mutate(Sample='Online'))
+other2plot.p1  = rbind(
+  fit_other_upd_PE_wdrift.p1.mri[[df2plot]] %>% transform4plot() %>% mutate(Sample='MRI'),   fit_other_upd_PE_wdrift.p1.online[[df2plot]] %>% transform4plot() %>% mutate(Sample='Online'))
+BLself2plot.p1  = rbind(
+  fit_BLself_upd_PE_wdrift.p1.mri[[df2plot]] %>% transform4plot() %>% mutate(Sample='MRI'),  fit_BLself_upd_PE_wdrift.p1.online[[df2plot]] %>% transform4plot() %>% mutate(Sample='Online'))
+BLother2plot.p1  = rbind(
+  fit_BLother_upd_PE_wdrift.p1.mri[[df2plot]] %>% transform4plot() %>% mutate(Sample='MRI'), fit_BLother_upd_PE_wdrift.p1.online[[df2plot]] %>% transform4plot() %>% mutate(Sample='Online'))
+# print number of subjects for which regression fit
+print(paste('Subject number NOT correctly fitted: SELF Participants n=',length(which(self2plot.p1$fitted.ok.flag==0)), ';  BL n=',length(which(BLself2plot.p1$fitted.ok.flag==0))))
+print(paste('Subject number NOT correctly fitted: OTHER Participants n=',length(which(other2plot.p1$fitted.ok.flag==0)), ';  BL n=',length(which(BLother2plot.p1$fitted.ok.flag==0))))
+```
+[1] "Subject number NOT correctly fitted: SELF Participants n= 0 ;  BL n= 0"
+[1] "Subject number NOT correctly fitted: OTHER Participants n= 0 ;  BL n= 0"
+
+# Plot regression results for fig 2e
+```{r,fig.height=2.5,fig.width=6}
+# bar plot
+lbls=c('total_PE' = 'tPE', 'total_PE.Ctrl' = 'tPE*\nControl', 'total_PE.OCtrl' = 'tPE*\n(1-Control)') # x tick labels
+lims=c(-1.2,1.5) # y axis limits
+
+ggarrange(align='h',common.legend = T,legend='right',widths = c(1.2,1),
+          self2plot.p1 %>% filter(regressor!='Ctrl') %>%
+            ggbarplot(.,'regressor',beta2plot,add=c('mean_se','jitter'),title='Self',fill='Sample',ylim=lims,position = position_dodge(0.75),add.params=list(size='Sample',alpha=0.1,show.legend=F),ylab='Effect on\nrating update') + 
+            geom_hline(yintercept = 0) + 
+            stat_summary(data = BLself2plot.p1%>%filter(regressor!='Ctrl'),aes(x=regressor,y=beta_estimate,color=Sample), fun="mean", geom="point",size=1,pch=21,stroke=0.7,position= position_dodge(1.1),show.legend = F) +
+            scale_size_manual(values=c(0.8,0.8)) +  scale_fill_manual(values=c(cols$Self,cols$SelfL)) + scale_x_discrete(labels=lbls) +
+            scale_color_manual(NULL,values = c('black','black'))+
+            geom_text(aes(family='Courier'),x = 'total_PE', y = 1.3,label='***',size=5) + geom_text(aes(family='Courier'),x = 'total_PE.Ctrl', y = 1.3,label='***',size=5) + geom_text(aes(fontface='italic'),x = 'Ctrl', y = 1.3,label='n.s.',size=4) +
+            theme_pubr(base_size=14)+theme(axis.title.x = element_blank(),plot.title = element_text(hjust = 0.5,size=14),axis.text.x = element_text(size=13),
+                                           legend.text=element_text(size=14),legend.box.margin=margin(-10,0,-10,-10),legend.background=element_rect(fill='transparent')),
+          other2plot.p1 %>% filter(regressor!='OCtrl') %>%
+            ggbarplot(.,'regressor',beta2plot,add=c('mean_se','jitter'),title='Other',fill='Sample',ylim=lims,position = position_dodge(0.75),add.params=list(size='Sample',alpha=0.1,show.legend=F),ylab='Effect on\nrating update') + 
+            geom_hline(yintercept = 0) + 
+            stat_summary(data = BLother2plot.p1%>%filter(regressor!='OCtrl'),aes(x=regressor,y=beta_estimate,color=Sample), fun="mean", geom="point",size=1,pch=21,stroke=0.7,position= position_dodge(1.1),show.legend = F) +
+            scale_size_manual(values=c(0.8,0.8)) +  scale_fill_manual(values=c(cols$Other,cols$OtherL)) + scale_x_discrete(labels=lbls) +
+            scale_color_manual(NULL,values = c('black','black'))+
+            geom_text(aes(family='Courier'),x = 'total_PE', y = 1.3,label='***',size=5) + geom_text(aes(family='Courier'),x = 'total_PE.OCtrl', y = 1.3,label='***',size=5) + geom_text(aes(family='Courier'),x = 'OCtrl', y = 1.3,label='***',size=5) +
+            theme_pubr(base_size=14)+theme(axis.title = element_blank(),plot.title = element_text(hjust = 0.5,size=14),axis.text.x = element_text(size=14),
+                                           legend.text=element_text(size=14),legend.box.margin=margin(-10,0,-10,-10),legend.background=element_rect(fill='transparent'))#
+)
+#ggsave(file.path(path$figs,'Fig02','Fig02E.jpg'),width = 14,height=5.8,units = 'cm')
+#ggsave(file.path(path$figs,'Fig02','Fig02E.svg'),width = 14,height=5.8,units = 'cm') 
+```
+The significance tests of these beta estimates are performed in script 05
