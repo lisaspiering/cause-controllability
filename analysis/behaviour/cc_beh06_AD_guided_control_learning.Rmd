@@ -1,0 +1,314 @@
+---
+title: "Active disambiguation enables inference of controllability"
+output: html_notebook
+---
+
+In this script, I examine whether people infer their control from AD and normal trials. I do this through a series of regression models. I then compare their regression results to that of the active learner, passive learner, and ignorant learner.
+
+```{r,include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(foreach);library(doParallel);library(sjPlot);library(cmdstanr); registerDoParallel(cores=15)# for parallel computing 
+library(ggtext) # for colored title plotting
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors;cols=out$cols
+
+# load MRI & online data
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online
+
+# plotting variables, special colors for participants, and the three learning models
+my.cols = c("#998EC3","#92C5DE","#F4A582","black") #from palette RdBu
+set.seed(905)
+```
+
+
+# Fit regressions
+## Inferring control and self based on the feedback difference on switch trials
+
+prep data
+```{r}
+tmp = lapply(list(dataB.mri = dataB.mri, dataB.online = dataB.online), function(.x) {
+  .x %>% filter(phase%in%c(1,3)) %>% 
+    rename(AT    = active_trial,  fb     = feedback,         trial = game_trial,         ctrl  = rate_ctrl,     tctrl  = control_level,          self  = rate_self,     other  = rate_other) %>%
+    mutate(fbU   = fb - feedback_prev,
+           ATS   = c(0,diff(AT)), # switch variable (pos if switch from AT to normal, neg if vice versa)
+           ATS   = ifelse(phase_trial==12 & player_mu_drift==1, 0, ATS), # set switch variable to 0 on first player_mu_drift trial bc here sth weird can happen with the feedback difference variable
+           swN2E = ifelse(ATS==1,-1,0), swE2N = ifelse(ATS==-1,1,0) # leave sign at -1 so that swE2N * fbU brings out positive effects (bc both are then negative)
+    ) %>%  
+    group_by(ID,game_number,phase) %>%
+    mutate(fbN2E    = swN2E * fbU,     fbE2N    = swE2N * fbU, # E2N: switch from AD to normal trial; N2E: switch from normal to AD trial
+           # control for Control-Other phase
+           ctrl_next = lead(ctrl), self_inv = log(1 / self), BL_ctrl_mu_next = lead(BL_ctrl_mu), self_mu_inv = log(1 / self_mu), IL_ctrl_mu_next = lead(IL_ctrl_mu), PL_ctrl_mu_next = lead(PL_ctrl_mu), 
+           ctrl_upd  = ctrl_next - ctrl, BL_ctrl_mu_upd = BL_ctrl_mu_next - BL_ctrl_mu, IL_ctrl_mu_upd = IL_ctrl_mu_next - IL_ctrl_mu, PL_ctrl_mu_upd = PL_ctrl_mu_next - PL_ctrl_mu, # rating update
+           # self for supplementary analysis for Self-Other phase
+           self_next = lead(self), tctrl_inv = log(1/tctrl), BL_self_mu_next = lead(BL_self_mu), IL_self_mu_next = lead(IL_self_mu), PL_self_mu_next = lead(PL_self_mu),
+           fbdiff   = ifelse(swN2E!=0,fbN2E,ifelse(swE2N!=0,fbE2N,0))) %>% # have a variable with both fbN2E & fbE2N
+    ungroup() %>% select(ID,game_number,phase,phase_trial,player_mu_drift,tctrl,ctrl,ctrl_next,ctrl_upd,self,self_next,self_inv,tctrl_inv,AT,ATS,fb,fbU,swE2N,fbE2N,swN2E,fbN2E,ATS,fbdiff,
+                         ends_with('L_ctrl_mu'),ends_with('L_ctrl_mu_next'),ends_with('L_ctrl_mu_upd'),self_mu,self_mu_inv,ends_with('L_self_mu_next'),ends_with('L_self_mu')) %>% 
+    # problem with some participants: if they rated self as 0 on a given trial, their optimal is Inf bc it has a division by 0 => therefore whenever people rate 0, I remove those trials
+    filter(phase_trial>1,ATS!=0,phase_trial<16, !is.infinite(self_inv))
+})
+
+dataB.mri.twise = tmp$dataB.mri
+dataB.online.twise = tmp$dataB.online
+
+# copy data in a separate copy for brms / hierarchical models
+dataB.mri.twise.brm = dataB.mri.twise 
+dataB.online.twise.brm = dataB.online.twise
+```
+
+
+Regression: Control inference in Control-Other phase (Figure 4)
+fit the same regression to participants, simulated data from active learner, ignorant learner, and passive learner
+```{r}
+# scale variables across participants to help hierarchical fit 
+vars2scale = c('BL_ctrl_mu_next','fbdiff','self_mu_inv','self_inv','BL_ctrl_mu_next','ctrl_next','PL_ctrl_mu_next','IL_ctrl_mu_next','BL_ctrl_mu_upd','ctrl_upd','PL_ctrl_mu_upd','IL_ctrl_mu_upd','BL_ctrl_mu','ctrl','PL_ctrl_mu','IL_ctrl_mu')
+dataB.both.twiseZ   = 
+  rbind(dataB.mri.twise.brm %>% mutate(sample='mri'), dataB.online.twise.brm %>% mutate(ID=ID+100, sample='online')) %>% 
+  filter(phase==3) %>% mutate(across(all_of(vars2scale),scale))
+
+# get participant numbers for each sample:
+dataB.both.twiseZ %>% filter(sample=='mri') %>% pull(ID) %>% unique() %>% length() #n=31 (all participants are included)
+dataB.both.twiseZ %>% filter(sample=='online') %>% pull(ID) %>% unique() %>% length() #n=36 (i.e. all participants)
+
+# fit regression
+fitctrl       = dataB.both.twiseZ %>% rename(selfinv=self_mu_inv,ctrlnow=BL_ctrl_mu)   %>% brm(BL_ctrl_mu_next ~ fbdiff * selfinv + ctrlnow + (fbdiff * selfinv + ctrlnow| ID), data=.,iter=4000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_BLctrl_p3 = dataB.both.twiseZ %>% rename(selfinv=self_mu_inv,ctrlnow=BL_ctrl_mu)   %>% update(fitctrl, newdata=., formula. = BL_ctrl_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors) # Active learner
+fit_ctrl_p3   = dataB.both.twiseZ %>% rename(selfinv=self_inv,   ctrlnow=ctrl)         %>% update(fitctrl, newdata=., formula. = ctrl_next ~.,      control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors) # participants
+fit_PLctrl_p3 = dataB.both.twiseZ %>% rename(selfinv=self_mu_inv,ctrlnow=PL_ctrl_mu)   %>% update(fitctrl, newdata=., formula. = PL_ctrl_mu_next ~.,control=list(adapt_delta=0.95),iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)  # passive learner
+fit_ILctrl_p3 = dataB.both.twiseZ %>% rename(selfinv=self_mu_inv,ctrlnow=IL_ctrl_mu)   %>% update(fitctrl, newdata=., formula. = IL_ctrl_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors) # ignorant learner
+
+# save fits
+allvars2save = c('fit_BLctrl_p3','fit_ctrl_p3','fit_PLctrl_p3','fit_ILctrl_p3')
+for (var2save in allvars2save) {save(list=var2save, file = file.path(path$save,'hierarchical',paste0(var2save,'.RData')))}
+```
+
+
+Regression: Self inference in Self-Other phase (supp figure 9b)
+```{r}
+# scale variables across participants to help hierarchical fit 
+vars2scale = c('BL_self_mu_next','fbdiff','tctrl_inv','self_next','PL_self_mu_next','IL_self_mu_next','self','BL_self_mu','PL_self_mu','IL_self_mu')
+dataB.both.twiseZ   = 
+  rbind(dataB.mri.twise.brm %>% mutate(sample='mri'), dataB.online.twise.brm %>% mutate(ID=ID+100, sample='online')) %>% 
+  filter(phase==1) %>% mutate(across(all_of(vars2scale),scale))
+
+# get participant numbers for each sample:
+dataB.both.twiseZ %>% filter(sample=='mri') %>% pull(ID) %>% unique() %>% length() #n=31 (all participants )
+dataB.both.twiseZ %>% filter(sample=='online') %>% pull(ID) %>% unique() %>% length() #n=36 (all)
+
+# fit regressions
+fitself       = dataB.both.twiseZ %>% rename(selfnow=BL_self_mu)   %>% brm(BL_self_mu_next ~ fbdiff * tctrl_inv + selfnow + (fbdiff * tctrl_inv + selfnow| ID), data=.,iter=4000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_BLself_p1 = dataB.both.twiseZ %>% rename(selfnow=BL_self_mu)   %>% update(fitself, newdata=., formula. = BL_self_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_self_p1   = dataB.both.twiseZ %>% rename(selfnow=self)         %>% update(fitself, newdata=., formula. = self_next ~.,      control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_PLself_p1 = dataB.both.twiseZ %>% rename(selfnow=PL_self_mu)   %>% update(fitself, newdata=., formula. = PL_self_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors) 
+fit_ILself_p1 = dataB.both.twiseZ %>% rename(selfnow=IL_self_mu)   %>% update(fitself, newdata=., formula. = IL_self_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+
+allvars2save = c('fit_BLself_p1','fit_self_p1','fit_PLself_p1','fit_ILself_p1')
+for (var2save in allvars2save) {save(list=var2save, file = file.path(path$save,'hierarchical',paste0(var2save,'.RData')))}
+```
+
+## Inferring other ratings from AD feedback on AD trials
+
+prep data
+```{r}
+tmp = lapply(list(dataB.mri = dataB.mri, dataB.online = dataB.online), function(.x) {
+  .x %>% filter(phase%in%c(1,3)) %>% 
+    rename(AT    = active_trial,  fb     = feedback,     trial = game_trial,         ctrl  = rate_ctrl,     tctrl  = control_level,          self  = rate_self,     other  = rate_other) %>%
+    mutate(ATS   = c(0,diff(AT)), # switch variable (pos if switch from AT to normal, neg if vice versa)
+           ATS   = ifelse(phase_trial==12 & player_mu_drift==1, 0, ATS),# set switch variable to 0 on first player_mu_drift trial bc here sth weird can happen with the feedback diff variable
+           swN2E = ifelse(ATS==1,-1,0), swE2N = ifelse(ATS==-1,1,0) # leave sign at -1 so that swE2N * fbU brings out positive effects (bc both are then negative)
+    ) %>%  
+    group_by(ID,game_number,phase) %>%
+    mutate(other_next = lead(other), BL_other_mu_next = lead(BL_other_mu), IL_other_mu_next = lead(IL_other_mu), PL_other_mu_next = lead(PL_other_mu), 
+           tctrl_other = 1-tctrl, rate_ctrl_other = (1-ctrl), BL_ctrl_other = (1-BL_ctrl_mu), IL_ctrl_other = (1-IL_ctrl_mu), PL_ctrl_other = (1-PL_ctrl_mu),
+           tctrl_other_inv = log(1/tctrl_other), rate_ctrl_other_inv = log(1/rate_ctrl_other), 
+           BL_ctrl_other_inv = log(1/BL_ctrl_other), IL_ctrl_other_inv = log(1/IL_ctrl_other), PL_ctrl_other_inv = log(1/PL_ctrl_other)
+    ) %>%
+    ungroup() %>% select(ID,game_number,phase,phase_trial,player_mu_drift,tctrl,ctrl,self,AT,ATS,fb,ATS,other_next,other,ends_with('L_other_mu_next'),ends_with('L_other_mu'),ends_with('ctrl_other_inv'),ends_with('ctrl_other')) %>% 
+    # problem with some participants: if they rated ctrl as 0 on a given trial, their optimal is Inf bc it has a division by 0 => therefore whenever people rate 0, I remove those trials
+    filter(AT==1,phase_trial<16,!is.infinite(rate_ctrl_other_inv),!is.infinite(PL_ctrl_other_inv))
+})
+
+dataB.mri.twise.brm.4other = tmp$dataB.mri
+dataB.online.twise.brm.4other = tmp$dataB.online
+```
+
+fit regression for Self-Other phase
+```{r}
+# scale variables across participants to help hierarchical fit 
+vars2scale = c('fb','tctrl_other_inv','other_next','BL_other_mu_next','IL_other_mu_next','PL_other_mu_next','other','BL_other_mu','PL_other_mu','IL_other_mu')
+dataB.both.twiseZ = 
+  rbind(dataB.mri.twise.brm.4other %>% mutate(sample='mri'), dataB.online.twise.brm.4other %>% mutate(ID=ID+100, sample='online')) %>% 
+  filter(phase==1) %>% mutate(across(all_of(vars2scale),scale))
+
+# get participant numbers for each sample:
+dataB.both.twiseZ %>% filter(sample=='mri') %>% pull(ID) %>% unique() %>% length() #n=31 
+dataB.both.twiseZ %>% filter(sample=='online') %>% pull(ID) %>% unique() %>% length() #n=36
+
+# fit regressions
+fitother       = dataB.both.twiseZ %>% rename(othernow=BL_other_mu)   %>% brm(BL_other_mu_next ~ fb * tctrl_other_inv + othernow + (fb * tctrl_other_inv + othernow| ID), data=.,iter=4000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_BLother_p1 = dataB.both.twiseZ %>% rename(othernow=BL_other_mu)   %>% update(fitother, newdata=., formula. = BL_other_mu_next ~.,control=list(adapt_delta=0.99), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_other_p1   = dataB.both.twiseZ %>% rename(othernow=other)         %>% update(fitother, newdata=., formula. = other_next ~.,      control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_PLother_p1 = dataB.both.twiseZ %>% rename(othernow=PL_other_mu)   %>% update(fitother, newdata=., formula. = PL_other_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors) 
+fit_ILother_p1 = dataB.both.twiseZ %>% rename(othernow=IL_other_mu)   %>% update(fitother, newdata=., formula. = IL_other_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+
+allvars2save = c('fit_BLother_p1','fit_other_p1','fit_PLother_p1','fit_ILother_p1')
+for (var2save in allvars2save) {save(list=var2save, file = file.path(path$save,'hierarchical',paste0(var2save,'.RData')))}
+```
+
+Control-Other phase
+```{r}
+# scale variables across participants to help hierarchical fit 
+vars2scale = c('fb','rate_ctrl_other_inv','BL_ctrl_other_inv','IL_ctrl_other_inv','PL_ctrl_other_inv',
+               'other_next','BL_other_mu_next','IL_other_mu_next','PL_other_mu_next','other','BL_other_mu','PL_other_mu','IL_other_mu')
+dataB.both.twiseZ = 
+  rbind(dataB.mri.twise.brm.4other %>% mutate(sample='mri'), dataB.online.twise.brm.4other %>% mutate(ID=ID+100, sample='online')) %>% 
+  filter(phase==3) %>% mutate(across(all_of(vars2scale),scale))
+
+# get participant numbers for each sample:
+dataB.both.twiseZ %>% filter(sample=='mri') %>% pull(ID) %>% unique() %>% length() #n=31 
+dataB.both.twiseZ %>% filter(sample=='online') %>% pull(ID) %>% unique() %>% length() #n=36
+
+# fit regressions
+fitother       = dataB.both.twiseZ %>% rename(othernow=BL_other_mu,ctrl_other_inv=BL_ctrl_other_inv)   %>% brm(BL_other_mu_next ~ fb * ctrl_other_inv + othernow + (fb * ctrl_other_inv + othernow| ID), data=.,iter=4000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_BLother_p3 = dataB.both.twiseZ %>% rename(othernow=BL_other_mu,ctrl_other_inv=BL_ctrl_other_inv)   %>% update(fitother, newdata=., formula. = BL_other_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_other_p3   = dataB.both.twiseZ %>% rename(othernow=other,      ctrl_other_inv=rate_ctrl_other_inv) %>% update(fitother, newdata=., formula. = other_next ~.,      control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+fit_PLother_p3 = dataB.both.twiseZ %>% rename(othernow=PL_other_mu,ctrl_other_inv=PL_ctrl_other_inv)   %>% update(fitother, newdata=., formula. = PL_other_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors) 
+fit_ILother_p3 = dataB.both.twiseZ %>% rename(othernow=IL_other_mu,ctrl_other_inv=IL_ctrl_other_inv)   %>% update(fitother, newdata=., formula. = IL_other_mu_next ~.,control=list(adapt_delta=0.9), iter=6000,cores=4,chains=4,refresh=0,prior=my.priors)
+
+allvars2save = c('fit_BLother_p3','fit_other_p3','fit_PLother_p3','fit_ILother_p3')
+for (var2save in allvars2save) {save(list=var2save, file = file.path(path$save,'hierarchical',paste0(var2save,'.RData')))}
+```
+
+# Plot regerssion results
+
+## Fig 4c-d - Control inference in Control-Other phase
+Fig 4D
+```{r,fig.width=6,fig.height=3.5}
+# load fitted parameters
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='ctrl_p3',full.names = T),load,.GlobalEnv)
+
+# make pretty legend
+lgd=c(paste0("<span style='color:",my.cols[4],"'>Participants  </span>"),paste0("<span style='color:",my.cols[3],"'> Active learner </span>"),
+      paste0("<span style='color:",my.cols[2],"'> Passive learner </span>"),paste0("<span style='color:",my.cols[1],"'> Ignorant learner</span>"))
+
+# get individual beta estimates
+reg_coef_IDs = rbind(
+  data.frame(fbdiff = coef(fit_ctrl_p3)$ID[,'Estimate','fbdiff'],
+             selfinv = coef(fit_ctrl_p3)$ID[,'Estimate','selfinv'],
+             `fbdiff:selfinv` = coef(fit_ctrl_p3)$ID[,'Estimate','fbdiff:selfinv'],
+             group = lgd[1]),
+  data.frame(fbdiff = coef(fit_BLctrl_p3)$ID[,'Estimate','fbdiff'],
+             selfinv = coef(fit_BLctrl_p3)$ID[,'Estimate','selfinv'],
+             `fbdiff:selfinv` = coef(fit_BLctrl_p3)$ID[,'Estimate','fbdiff:selfinv'],
+             group = lgd[2]),
+  data.frame(fbdiff = coef(fit_PLctrl_p3)$ID[,'Estimate','fbdiff'],
+             selfinv = coef(fit_PLctrl_p3)$ID[,'Estimate','selfinv'],
+             `fbdiff:selfinv` = coef(fit_PLctrl_p3)$ID[,'Estimate','fbdiff:selfinv'],
+             group = lgd[3]),
+  data.frame(fbdiff = coef(fit_ILctrl_p3)$ID[,'Estimate','fbdiff'],
+             selfinv = coef(fit_ILctrl_p3)$ID[,'Estimate','selfinv'],
+             `fbdiff:selfinv` = coef(fit_ILctrl_p3)$ID[,'Estimate','fbdiff:selfinv'],
+             group = lgd[4])
+) %>% mutate(type = factor(group,levels=lgd[4:1])) %>%
+  pivot_longer(cols = c(fbdiff,selfinv,`fbdiff.selfinv`),names_to = 'term',values_to = 'estimate') %>%
+  mutate(term_labels = ifelse(term=='fbdiff','Feedback\ndifference',ifelse(term=='selfinv','Inverse Self','Feedback\ndifference * Inverse Self')),
+         term_labels2 = ifelse(term=='fbdiff','b_fbdiff',ifelse(term=='selfinv','b_selfinv','b_fbdiff:selfinv')))
+
+# plot
+p = plot_models(fit_ctrl_p3,     fit_BLctrl_p3,     fit_PLctrl_p3,     fit_ILctrl_p3,     rm.terms = c('b_Intercept','b_ctrlnow'),legend.title = '',dot.size=2.5,colors=my.cols,m.labels = lgd, 
+            axis.title='Effect on Control estimate', axis.labels=c('Feedback\ndifference * Inverse Self','Inverse Self','Feedback\ndifference')) +
+  geom_point(data=reg_coef_IDs,aes(y=estimate,x=term_labels2,fill=type),inherit.aes=F,color='lightgrey',size=0.1,alpha=0.4,position=position_jitterdodge(jitter.width = 0.15,dodge.width = 0.4),show.legend = F) +
+  guides(colour = guide_legend(reverse=T,override.aes = list(shape = NA,lty=NA))) + ylim(-0.7,1.05) +
+  theme_pubr(base_size=14)+ theme(legend.text = element_markdown(size=14),legend.position = c(0.8, 0.25),legend.background = element_blank()); p$layers = p$layers[c(1,4:2)];p # bring geom_point to background
+#ggsave(plot = p,filename = file.path(path$figs,'Fig04','Fig04c.jpg'),width = 16,height=10,units = 'cm') 
+#ggsave(plot = p,filename = file.path(path$figs,'Fig04','Fig04c.svg'),width = 16,height=10,units = 'cm') 
+
+# save estimates for reporting in paper
+tab_model(fit_ctrl_p3, fit_BLctrl_p3, fit_PLctrl_p3, fit_ILctrl_p3, show.ci=0.95,file=file.path(path$tables,'table_fig04c_ci95.html'))
+tab_model(fit_ctrl_p3, fit_BLctrl_p3, fit_PLctrl_p3, fit_ILctrl_p3, show.ci=0.99,file=file.path(path$tables,'table_fig04c_ci99.html'))
+tab_model(fit_ctrl_p3, fit_BLctrl_p3, fit_PLctrl_p3, fit_ILctrl_p3, show.ci=0.999,file=file.path(path$tables,'table_fig04c_ci999.html'))
+```
+
+
+Fig 4d - Interaction effect
+```{r,fig.width=6,fig.height=4}
+int_cols = c('#D3D3D3','#A9A9A9','#808080')# "Greys"
+int_conditions <- list(selfinv = setNames(c(-1, 0, 1), c("High", "Med", "Low")))
+ggarrange(align='hv',common.legend = T,legend = 'right',
+          plot(conditional_effects(fit_ctrl_p3,effects = 'fbdiff:selfinv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('Feedback difference') + ylab('Control estimate') + ggtitle('Participants') + 
+            scale_y_continuous(breaks=c(-1,0,1)) +
+            scale_color_manual('Self',values = int_cols) + scale_fill_manual('Self',values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,face = 'bold',color=my.cols[4])),
+          plot(conditional_effects(fit_BLctrl_p3,effects = 'fbdiff:selfinv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('Feedback difference') + ylab(element_blank()) + ggtitle('Active learner') +  
+            scale_color_manual('Self',values = int_cols) + scale_fill_manual('Self',values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,face = 'bold',color=my.cols[3])),
+          plot(conditional_effects(fit_PLctrl_p3,effects = 'fbdiff:selfinv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('Feedback difference') + ylab('Control estimate') + ggtitle('Passive learner') +
+            scale_y_continuous(breaks=c(-1,0,1),limits=c(-1,1)) +
+            scale_color_manual('Self',values = int_cols) + scale_fill_manual('Self',values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,face = 'bold',color=my.cols[2])),
+          plot(conditional_effects(fit_ILctrl_p3,effects = 'fbdiff:selfinv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('Feedback difference') + ylab(element_blank()) + ggtitle('Ignorant learner') + 
+            scale_y_continuous(breaks=c(-1,0,1)) +
+            scale_color_manual('Self',values = int_cols) + scale_fill_manual('Self',values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,face = 'bold',color=my.cols[1]))) %>%
+  annotate_figure(.,top=text_grob('Interaction effect',size = 16))
+#ggsave(file.path(path$figs,'Fig04','Fig04E.jpg'),width = 16,height=11,units = 'cm')
+#ggsave(file.path(path$figs,'Fig04','Fig04E.svg'),width = 16,height=11,units = 'cm') 
+```
+
+## Supplementary figure 9 - AD-guided self and other learning
+```{r}
+# load fitted parameters
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='self_p1|other_p',full.names = T),load,.GlobalEnv)
+
+# plot 
+lgd=c(paste0("<span style='color:",my.cols[4],"'>Participants  </span>"),paste0("<span style='color:",my.cols[3],"'> Active learner </span>"),
+      paste0("<span style='color:",my.cols[2],"'> Passive learner </span>"),paste0("<span style='color:",my.cols[1],"'> Ignorant learner</span>"))
+
+# Self in p1
+panel_S_p1 = plot_models(fit_self_p1,     fit_BLself_p1,     fit_PLself_p1,     fit_ILself_p1,     rm.terms = c('b_Intercept','b_selfnow'),title='Self in Self-Other phase',legend.title = '',dot.size=2.5,colors=my.cols,m.labels = lgd,
+                         axis.title='Effect on Self estimate', axis.labels=c('Feedback\ndifference * Inverse Control','Inverse Control','Feedback\ndifference')) +
+  guides(colour = guide_legend(reverse=T,override.aes = list(shape = NA,lty=NA))) + ylim(-0.5,1) + theme_pubr(base_size=14)+ theme(legend.text = element_markdown(size=14),legend.position = c(0.8, 0.3),legend.background = element_blank()) 
+# Other in p1
+panel_O_p1 = plot_models(fit_other_p1,     fit_BLother_p1,     fit_PLother_p1,     fit_ILother_p1,rm.terms=c('b_Intercept','b_othernow'),title='Other in Self-Other phase',legend.title = '',dot.size=2.5,colors=my.cols,m.labels = lgd,
+                         axis.title='Effect on Other estimate', axis.labels=c("AD feedback *\nInverse other's control","Inverse\nother's control",'AD feedback')) + 
+  guides(colour = guide_legend(reverse=T,override.aes = list(shape = NA,lty=NA))) + ylim(-0.5,2) + theme_pubr(base_size=14)+ theme(legend.text = element_markdown(size=14),legend.position = c(0.8, 0.3),legend.background = element_blank()) 
+# Other in p3
+panel_O_p3 = plot_models(fit_other_p3,     fit_BLother_p3,     fit_PLother_p3,     fit_ILother_p3,rm.terms=c('b_Intercept','b_othernow'),title='Other in Control-Other phase',legend.title = '',dot.size=2.5,colors=my.cols,m.labels = lgd,
+                         axis.title='Effect on Other estimate', axis.labels=c("AD feedback *\nInverse other's control","Inverse\nother's control",'AD feedback')) + 
+  guides(colour = guide_legend(reverse=T,override.aes = list(shape = NA,lty=NA))) + ylim(-0.5,1.5) + theme_pubr(base_size=14)+ theme(legend.text = element_markdown(size=14),legend.position = c(0.8, 0.3),legend.background = element_blank()) 
+
+# interaction effect for other in p1
+int_cols = c('#D3D3D3','#A9A9A9','#808080')# "Greys"
+int_conditions <- list(tctrl_other_inv = setNames(c(-1, 0, 1), c("High", "Med", "Low")))
+panel_O_p1_int = ggarrange(align='hv',common.legend = T,legend = 'right',ncol=4,
+                           plot(conditional_effects(fit_other_p1,effects = 'fb:tctrl_other_inv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('AD feedback') + ylab('Other estimate') + ggtitle('Participants') + 
+                             scale_color_manual("Other's control",values = int_cols) + scale_fill_manual("Other's control",values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,size=14,color=my.cols[4])),
+                           plot(conditional_effects(fit_BLother_p1,effects = 'fb:tctrl_other_inv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('AD feedback') + ylab(element_blank()) + ggtitle('Active learner') +  
+                             scale_color_manual("Other's control",values = int_cols) + scale_fill_manual("Other's control",values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,size=14,color=my.cols[3])),
+                           plot(conditional_effects(fit_ILother_p1,effects = 'fb:tctrl_other_inv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('AD feedback') + ylab(element_blank()) + ggtitle('Ignorant learner') +
+                             scale_color_manual("Other's control",values = int_cols) + scale_fill_manual("Other's control",values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,size=14,color=my.cols[1])),
+                           plot(conditional_effects(fit_PLother_p1,effects = 'fb:tctrl_other_inv',int_conditions=int_conditions),ask=F,plot=F)[[1]] + xlab('AD feedback') + ylab(element_blank()) + ggtitle('Passive learner') + scale_y_continuous(breaks=c(-1,0,1))+
+                             scale_color_manual("Other's control",values = int_cols) + scale_fill_manual("Other's control",values = int_cols) + theme_pubr(base_size=14)+theme(legend.text=element_text(size=14),plot.title = element_text(hjust=0.5,size=14,color=my.cols[2]))) %>%
+  annotate_figure(.,top=text_grob('Interaction effect of Other in Self-Other phase',size = 16,just='right'))
+
+# plot together
+ggarrange(ggarrange('',panel_S_p1),ggarrange(panel_O_p1,panel_O_p3),panel_O_p1_int,nrow=3,ncol=1,heights=c(1,1,0.8))
+##ggsave(file.path(path$figs,'Supplementals','FigX_beh_selfother_afterADswitch_raw.jpg'),width = 30,height=22,units = 'cm')
+```
+
+Save estimates for significance reporting
+```{r,fig.width=6,fig.height=3.5}
+# self p1
+tab_model(fit_self_p1, fit_BLself_p1, fit_PLself_p1, fit_ILself_p1, show.ci=0.95,file=file.path(path$tables,'table_figSX_self_after_switch_p1_ci95.html'))
+tab_model(fit_self_p1, fit_BLself_p1, fit_PLself_p1, fit_ILself_p1, show.ci=0.99,file=file.path(path$tables,'table_figSX_self_after_switch_p1_ci99.html'))
+tab_model(fit_self_p1, fit_BLself_p1, fit_PLself_p1, fit_ILself_p1, show.ci=0.999,file=file.path(path$tables,'table_figSX_self_after_switch_p1_ci999.html'))
+# other p1
+tab_model(fit_other_p1, fit_BLother_p1, fit_PLother_p1, fit_ILother_p1, show.ci=0.95,file=file.path(path$tables,'table_figSX_other_after_AD_p1_ci95.html'))
+tab_model(fit_other_p1, fit_BLother_p1, fit_PLother_p1, fit_ILother_p1, show.ci=0.99,file=file.path(path$tables,'table_figSX_other_after_AD_p1_ci99.html'))
+tab_model(fit_other_p1, fit_BLother_p1, fit_PLother_p1, fit_ILother_p1, show.ci=0.999,file=file.path(path$tables,'table_figSX_other_after_AD_p1_ci999.html'))
+# other p3
+tab_model(fit_other_p3, fit_BLother_p3, fit_PLother_p3, fit_ILother_p3, show.ci=0.95,file=file.path(path$tables,'table_figSX_other_after_AD_p3_ci95.html'))
+tab_model(fit_other_p3, fit_BLother_p3, fit_PLother_p3, fit_ILother_p3, show.ci=0.99,file=file.path(path$tables,'table_figSX_other_after_AD_p3_ci99.html'))
+tab_model(fit_other_p3, fit_BLother_p3, fit_PLother_p3, fit_ILother_p3, show.ci=0.999,file=file.path(path$tables,'table_figSX_other_after_AD_p3_ci999.html'))
+```
