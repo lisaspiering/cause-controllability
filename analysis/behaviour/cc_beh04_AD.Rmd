@@ -1,0 +1,199 @@
+---
+title: "Active disambiguation"
+output: html_notebook
+---
+
+Here, we investigate the dynamics around AD using regressions.
+
+```{r,include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(foreach);library(doParallel); registerDoParallel(cores=15)# for parallel computing 
+
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors; cols= out$cols
+
+# load MRI & online data
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online
+```
+
+# fit regressions for Fig 3e-f
+## AD -> lower error (Figure 3f)
+```{r, include=F}
+subs2exclude = list(mri = list(p1 = c(), p3 = c()),online = list(p1 = c(), p3 = c()))
+
+for (sample2fit in c('mri','online')) { 
+  # Participants
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars,fit.sub.result))
+  fit.name  = paste0('fit_sum_err_AT12.p13.',sample2fit)
+  fit.vars  = list(notscale = c('active_1after','active_2after','phase'), toscale=c('rate_sum_err','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval() %>% dplyr::filter(phase!=2,!ID%in%c(subs2exclude[[sample2fit]]$p1,subs2exclude[[sample2fit]]$p3)) %>%
+    mutate(phase = as.factor(phase)) %>% select(ID,game_number,phase,all_of(fit.vars$notscale),all_of(fit.vars$toscale))
+  dfT       = fit.data %>% dplyr::filter(ID==1) %>% mutate_at(fit.vars$toscale,scale)
+  fit.model = brm(formula = rate_sum_err ~ active_1after + active_2after + phase_trial + phase, data=dfT,family='normal',iter=4000,chains=4,refresh=0,prior=my.priors)
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+  
+  # BAYESIAN LEARNER
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars,fit.sub.result))
+  fit.name  = paste0('fit_BLsum_err_AT12.p13.',sample2fit)
+  fit.vars  = list(notscale = c('active_1after','active_2after','phase'), toscale=c('BL_mu_sum_err','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval()  %>% dplyr::filter(phase!=2,!ID%in%c(subs2exclude[[sample2fit]]$p1,subs2exclude[[sample2fit]]$p3)) %>% 
+    mutate(phase = as.factor(phase)) %>% select(ID,game_number,phase,all_of(fit.vars$notscale),all_of(fit.vars$toscale))
+  dfT       = fit.data %>% dplyr::filter(ID==1) %>% mutate_at(fit.vars$toscale,scale)
+  fit.model = brm(formula = BL_mu_sum_err ~ active_1after + active_2after + phase_trial + phase, data=dfT,family='normal',iter=4000,chains=4,refresh=0,prior=my.priors)
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+}
+```
+
+## AD -> lower uncertainty (Figure 3e)
+included player_mu_drift which indexes whether the other player changed performance unannounced
+```{r, include=F}
+for (sample2fit in c('mri','online')) {
+  suppressWarnings(rm(fit.name,fit.data,fit.model,fit.vars ))
+  fit.name  = paste0('fit_avg_unc_AT12_drift.p13.',sample2fit)
+  fit.vars  = list(notscale=c('active_1after','active_2after','phase','player_mu_drift'),toscale=c('BL_avg_unc','phase_trial'))
+  fit.data  = paste0('dataB.',sample2fit) %>% as.name() %>% eval() %>% dplyr::filter(phase!=2) %>% select(ID,game_number,phase,all_of(fit.vars$toscale),all_of(fit.vars$notscale))
+  dfT       = fit.data %>% dplyr::filter(ID==4) %>% mutate_at(fit.vars$toscale,scale)  
+  fit.model = brm(formula = BL_avg_unc ~ active_1after + active_2after + phase_trial + phase + player_mu_drift, data=dfT,family='normal',iter=4000,chains=4,control=list(adapt_delta=0.9),refresh=0,prior=my.priors)  
+  results   = fit_sub_behaviour(fit.data,fit.vars,fit.model,fit.name,path,my.priors); assign(fit.name, results)
+}
+```
+
+# Plot Fig 3e-f
+```{r,fig.height=5,fig.width=3.5}
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='_AT12',full.names = T),load,.GlobalEnv)
+transform4plot = function(data) {
+  data = data %>% rename(AT1=active_1after1,AT2=active_2after1 ) %>% pivot_longer(cols=AT1:AT2 ,values_to=beta2plot,names_to = 'regressor')
+  return(data)
+}
+# put data together
+## errors
+err.sum2plot.p13   = rbind(fit_sum_err_AT12.p13.mri[[df2plot]]      %>% transform4plot() %>% mutate(Sample='MRI'),     fit_sum_err_AT12.p13.online[[df2plot]]   %>% transform4plot() %>% mutate(Sample='Online'))
+err.BLsum2plot.p13 = rbind(fit_BLsum_err_AT12.p13.mri[[df2plot]]    %>% transform4plot() %>% mutate(Sample='MRI'),     fit_BLsum_err_AT12.p13.online[[df2plot]] %>% transform4plot() %>% mutate(Sample='Online'))
+unc2plot.avg13upd  = rbind(fit_avg_unc_AT12_drift.p13.mri[[df2plot]]      %>% transform4plot() %>% mutate(Sample='MRI'),     fit_avg_unc_AT12_drift.p13.online[[df2plot]]   %>% transform4plot() %>% mutate(Sample='Online'))
+## print number of subjects for which regression fit
+print(paste('Subject number NOT correctly fitted: ERROR Participants n=',length(which(err.sum2plot.p13$fitted.ok.flag==0)), ';  BL n=',length(which(err.BLsum2plot.p13$fitted.ok.flag==0))))
+print(paste('Subject number NOT correctly fitted: UNCERTAINTY Participants n=',length(which(unc2plot.avg13upd$fitted.ok.flag==0))))
+
+# plot
+lbls=c('AT1' = '1 trial\nafter AD', 'AT2' = '2 trials\nafter AD')
+p1 = unc2plot.avg13upd %>%
+  ggbarplot(.,'regressor','beta_estimate',add=c('mean_se','jitter'),fill='Sample',ylab='Effect on uncertainty',position = position_dodge(0.75),add.params=list(size='Sample',alpha=0.1,show.legend=F)) + 
+  geom_hline(yintercept = 0) + geom_text(aes(family='Courier'),x = 'AT1', y = -1.4,label='***',size=5) + geom_text(aes(family='Courier'),x = 'AT2', y = -1.4,label='***',size=5) +
+  scale_x_discrete(labels=lbls) + scale_fill_manual(values = c(cols$AD,cols$ADL)) + scale_size_manual(values=c(0.8,0.8)) +
+  theme_pubr(base_size=14)+theme(legend.position = 'right', axis.title.x = element_blank(),legend.box.margin=margin(-10,-10,-10,-10), legend.text = element_text(size=14))
+p2 = err.sum2plot.p13 %>% ggbarplot(.,'regressor',beta2plot,add=c('mean_se','jitter'),fill='Sample',position = position_dodge(0.75),add.params=list(size='Sample',alpha=0.1,show.legend=F),ylab='Effect on rating error',xlab='') + 
+  geom_hline(yintercept = 0) + 
+  stat_summary(data = err.BLsum2plot.p13,aes(x=regressor,y=beta_estimate,color=Sample), fun="mean", geom="point",size=1,pch=21,stroke=0.7,position=position_dodge(1.1)) +
+  scale_size_manual(values=c(0.8,0.8)) + scale_fill_manual(values=c(cols$AD,cols$ADL)) + scale_color_manual(NULL,values = c('black','black'),breaks='MRI',labels=c('Active\nlearner',element_blank())) + scale_x_discrete(labels=lbls) +
+  geom_text(aes(family='Courier'),x = 'AT1', y = -0.8,label='**',size=5) + geom_text(aes(family='Courier'),x = 'AT2', y = -0.8,label='***',size=5) + 
+  theme_pubr(base_size=14)+theme(axis.title.x = element_blank(),legend.position='right',legend.box.margin=margin(-10,-10,-10,-10), legend.text = element_text(size=14)) 
+ggarrange(p1,p2,nrow=2)
+#ggsave(file.path(path$figs,'Fig03','Fig03CD.jpg'),width = 9.5,height=13,units = 'cm')
+#ggsave(file.path(path$figs,'Fig03','Fig03CD.svg'),width = 9.5,height=13,units = 'cm') 
+```
+[1] "Subject number NOT correctly fitted: ERROR Participants n= 0 ;  BL n= 0"
+[1] "Subject number NOT correctly fitted: UNCERTAINTY Participants n= 0"
+
+The significance tests of these beta estimates are performed in script 05
+
+# Supplementary figure 10
+
+we examined whether 
+a) AD trials are more driven by control than other uncertainty
+b) control updating (more so than other updating) is driven by the control uncertainty (relative to other uncertainty), AD, switch trials, and whether the other player changed performance unannounced (player_mu_drift)
+AD ~ ctrl vs other uncertainty; control vs other updating ~ control vs other uncertainty + AD + switch + player drift
+
+Prep data
+```{r,include=F}
+# function to add new columns
+add_cols = function(data) {
+  data = data %>% group_by(ID,game_number,phase) %>%
+    mutate(rel_updAbsN_ctrl_vs_other    = 100*rate_ctrl_updAbsN - rate_other_updAbsN, # *100 for ctrl to bring it to the same scale as other rating
+           BL_ctrl_mu_updAbsN           = lead(BL_ctrl_mu_upd)%>%abs(),
+           BL_other_mu_updAbsN          = lead(BL_other_mu_upd)%>%abs(),
+           BL_self_mu_updAbsN           = lead(BL_self_mu_upd)%>%abs(),
+           BL_rel_updAbsN_ctrl_vs_other = 100*BL_ctrl_mu_updAbsN - BL_other_mu_updAbsN,
+           BL_rel_updAbsN_self_vs_other = BL_self_mu_updAbsN - BL_other_mu_updAbsN,
+           BL_cvso_unc = 100*BL_ctrl_unc - BL_other_unc,
+           switch_trial   = c(0,abs(diff(as.numeric(active_trial))))%>%as.factor()) %>% ungroup()
+  return(data)
+}
+dataB.mri    = add_cols(dataB.mri)
+dataB.online = add_cols(dataB.online)
+
+# put data together and normalise variables for hierarchical regression
+vars2scale = c('rel_updAbsN_ctrl_vs_other','phase_trial','BL_cvso_unc')
+dataB.all = rbind(dataB.mri %>% mutate(sample='mri') %>% select(ID,phase,all_of(vars2scale),game_number,sample,active_trial,switch_trial,player_mu_drift), 
+                  dataB.online %>% mutate(ID=ID+100, sample='online') %>% select(ID,phase,all_of(vars2scale),game_number,sample,active_trial,switch_trial,player_mu_drift))
+# data for everything till trial 15, for control updating
+dataB.allZ.trialto15 = dataB.all %>% filter(phase==3,phase_trial<16) %>% mutate(across(all_of(vars2scale),scale), across(c(active_trial,switch_trial,player_mu_drift), as.factor))
+# for AD regression, include all trials
+dataB.allZ.trialto16 = dataB.all %>% filter(phase==3) %>% mutate(across(all_of(vars2scale),scale), across(c(active_trial,switch_trial,player_mu_drift), as.factor))
+```
+
+Fit regression
+```{r}
+fit_relupd_drift = dataB.allZ.trialto15 %>% 
+  brm(rel_updAbsN_ctrl_vs_other ~ BL_cvso_unc + player_mu_drift * (active_trial + switch_trial) + phase_trial + (BL_cvso_unc + player_mu_drift * (active_trial + switch_trial) + phase_trial | ID), data=.,iter=4000,cores=4,chains=4,refresh=0,prior=my.priors)
+save(fit_relupd_drift, file = file.path(path$save,'hierarchical','fit_relupd_drift.RData'))
+fit_AD_cvsounc = dataB.allZ.trialto16 %>% 
+  brm(active_trial ~ BL_cvso_unc + phase_trial + (BL_cvso_unc + phase_trial | ID), data=.,control = list(adapt_delta=0.95),iter=4000,cores=4,chains=4,refresh=0,prior=my.priors, family=bernoulli(link = 'logit'))
+save(fit_AD_cvsounc, file = file.path(path$save,'hierarchical','fit_AD_cvsounc.RData'))
+```
+
+Plot results
+```{r}
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='relupd|cvsounc',full.names = T),load,.GlobalEnv)
+# get individual beta estimates
+reg_coef_IDs = data.frame(player_mu_drift1 = coef(fit_relupd_drift)$ID[,'Estimate','player_mu_drift1'],
+                          active_trial1 = coef(fit_relupd_drift)$ID[,'Estimate','active_trial1'],
+                          switch_trial1 = coef(fit_relupd_drift)$ID[,'Estimate','switch_trial1'],
+                          BL_cvso_unc = coef(fit_relupd_drift)$ID[,'Estimate','BL_cvso_unc'],
+                          `player_mu_drift1:active_trial1` = coef(fit_relupd_drift)$ID[,'Estimate','player_mu_drift1:active_trial1'],
+                          `player_mu_drift1:switch_trial1` = coef(fit_relupd_drift)$ID[,'Estimate','player_mu_drift1:switch_trial1']) %>%
+  pivot_longer(cols = everything(),names_to = 'term',values_to = 'estimate') %>%
+  mutate(term_labels = case_when(term=='player_mu_drift1' ~ 'Other changed',
+                                 term=='active_trial1' ~ 'AD trial',
+                                 term=='switch_trial1' ~ 'Switch trial',
+                                 term=='BL_cvso_unc' ~ 'Control vs Other uncertainty',
+                                 term=='player_mu_drift1.active_trial1' ~ 'Other changed:AD trial',
+                                 term=='player_mu_drift1.switch_trial1' ~ 'Other changed:switch trial'),
+         term_labels2 = case_when(term=='player_mu_drift1' ~ 'b_player_mu_drift1',
+                                  term=='active_trial1' ~ 'b_active_trial1',
+                                  term=='switch_trial1' ~ 'b_switch_trial1',
+                                  term=='BL_cvso_unc' ~ 'b_BL_cvso_unc',
+                                  term=='player_mu_drift1.active_trial1' ~ 'b_player_mu_drift1:active_trial1',
+                                  term=='player_mu_drift1.switch_trial1' ~ 'b_player_mu_drift1:switch_trial1'))
+# get individual beta estimates for AD ~ control vs other uncertainty
+reg_coef_IDs_AD_cvsounc = data.frame(BL_cvso_unc = coef(fit_AD_cvsounc)$ID[,'Estimate','BL_cvso_unc'],
+                                     phase_trial = coef(fit_AD_cvsounc)$ID[,'Estimate','phase_trial']) %>%
+  pivot_longer(cols = everything(),names_to = 'term',values_to = 'estimate') %>%
+  mutate(term_labels = case_when(term=='BL_cvso_unc' ~ 'Control vs Other uncertainty',
+                                 term=='phase_trial' ~ 'Phase trial'),
+         term_labels2 = case_when(term=='BL_cvso_unc' ~ 'b_BL_cvso_unc',
+                                  term=='phase_trial' ~ 'b_phase_trial'))
+
+# plot 
+ggarrange(nrow=2,align='v',heights=c(1,2),
+  plot_models(fit_AD_cvsounc,colors = 'black',rm.terms=c('b_Intercept','b_phase_trial'),axis.labels=c('Control vs other uncertainty'),transform = NULL) + ylab('Effect on AD') + ylim(-0.5,0.5) + geom_hline(yintercept=0,color='grey',linewidth = 0.2) +
+    geom_point(data=reg_coef_IDs_AD_cvsounc%>%filter(term=='BL_cvso_unc'),aes(y=estimate,x=term_labels2),inherit.aes=F,color='black',size=0.2,alpha=0.2,position=position_jitter(width = 0.1)) +
+    theme(legend.position = 'none'),
+  plot_models(fit_relupd_drift,rm.terms = c('b_Intercept','b_phase_trial'),colors='black',wrap.labels = 20,axis.labels=c('Other changed * Switch trial','Other changed * AD trial','Switch trial','AD trial','Other changed','Control vs other uncertainty')) + 
+    geom_point(data=reg_coef_IDs,aes(y=estimate,x=term_labels2),inherit.aes=F,color='black',size=0.2,alpha=0.2,position=position_jitter(width = 0.1)) +
+    ylab('Effect on control vs other updating') +theme(legend.position='none')
+)
+#ggsave(file.path(path$figs,'Supplementals','FigX_beh_relupd-drift-p3_raw.jpg'),width=15,height=12,units='cm')
+
+# save stats
+tab_model(fit_relupd_drift, show.ci=0.95,show.r2=FALSE,show.icc=FALSE,show.re.var=FALSE,file=file.path(path$tables,'table_figSX_relupd_drift_p3_ci95.html'))
+tab_model(fit_relupd_drift, show.ci=0.99,show.r2=FALSE,show.icc=FALSE,show.re.var=FALSE,file=file.path(path$tables,'table_figSX_relupd_drift_p3_ci99.html'))
+tab_model(fit_relupd_drift, show.ci=0.999,show.r2=FALSE,show.icc=FALSE,show.re.var=FALSE,file=file.path(path$tables,'table_figSX_relupd_drift_p3_ci999.html'))
+tab_model(fit_AD_cvsounc, show.ci=0.95,show.r2=FALSE,show.icc=FALSE,show.re.var=FALSE,transform = NULL,file=file.path(path$tables,'table_figSX_AD_relunc_p3_ci95.html'))
+tab_model(fit_AD_cvsounc, show.ci=0.99,show.r2=FALSE,show.icc=FALSE,show.re.var=FALSE,transform = NULL,file=file.path(path$tables,'table_figSX_AD_relunc_p3_ci99.html'))
+tab_model(fit_AD_cvsounc, show.ci=0.999,show.r2=FALSE,show.icc=FALSE,show.re.var=FALSE,transform = NULL,file=file.path(path$tables,'table_figSX_AD_relunc_p3_ci999.html'))
+```
