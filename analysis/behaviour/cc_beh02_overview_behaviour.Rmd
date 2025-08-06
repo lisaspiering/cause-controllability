@@ -1,0 +1,833 @@
+---
+title: "Overview of behaviour"
+output: html_notebook
+---
+
+In this script, we want to get a general overview of participants' behaviour. For this, we create various plots.
+
+```{r, include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(foreach);library(doParallel); registerDoParallel(cores=15)# for parallel computing 
+
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors; cols = out$cols
+
+# for one debrief questionnaire plot, we want to load larger sample of online+mri participants that we later exclude again, here we load them and save this different sample under another name
+load(file.path(path$data,'preprocessed_behaviour_online.RData'))
+dataB.online.w0AD = dataB.online; dataQ.online.w0AD = dataQ.online;
+# now same for MRI, load data including 3 participants who we otherwise exclude bc low number of switches in p3
+load(file = file.path(path$data,'preprocessed_behaviour_mri.RData'))
+dataB.mri.w0AD = dataB.mri; dataQ.mri.w0AD = dataQ.mri
+
+# load final MRI & online dataset
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online
+```
+
+
+# Task
+
+## Fig 1D: task schedule
+plot an example task block
+```{r}
+game2plot = 3
+dataB.mri %>% filter(game_number==game2plot) %>% mutate(player_mu=ifelse(phase!=2,player_mu,NA), control_level=ifelse(phase!=2,100*control_level,NA)) %>%
+  select(game_trial,control_level,player_mu,self_mu,game_number) %>% unique() %>%
+  ggplot(., aes(x=game_trial)) + geom_vline(xintercept = 16.5,lty='dashed') + geom_vline(xintercept = 20.5,lty='dashed') + 
+  geom_line(aes(y=control_level-1,color='Control',size='Truth'), size=1) + geom_line(aes(y=self_mu,color='Self',size='Truth'),size=1) + 
+  geom_line(aes(y=player_mu+1,color='Other',size='Truth'),size=1) + 
+  scale_color_manual(values=c(cols$Control,cols$Other,cols$Self)) +
+  ylim(0,105) + ylab("True level") + xlab("Trial") + ggtitle(paste0('Example block (',game2plot,' out of 4)')) + 
+  theme_pubr() + theme(legend.position = 'right',legend.title = element_blank(),legend.text=element_text(size=12))
+
+#ggsave(file.path(path$figs,'Fig01','Fig01d_phases.png'),width=5,height=2.5) 
+#ggsave(file.path(path$figs,'Fig01','Fig01d_phases.svg'),width=5,height=2.5) # vector graphic
+```
+
+## Supplementary figure 2: Feedback function
+illustrate the feedback function
+```{r}
+# PANEL A: self feedback function
+# get some example values from first participant
+nsamples=500
+slope = log((1/(1-0.55)) - 1) / (dataB.mri$performanceMean[1] - dataB.mri$performanceMin[1])
+
+# simulate data points
+dat2plotA = data.frame(perferror = c(1:nsamples,1:nsamples,1:nsamples),
+                       self_mu = c(rep(20,nsamples),rep(50,nsamples),rep(80,nsamples))) %>%
+  mutate(shift = dataB.mri$performanceMean[1] + (log(1/(1- self_mu/100) - 1) /   slope),
+         self_fb = (1-1/(1+exp(slope*(shift-perferror))))*100,
+         self_mu2 = as.factor(self_mu))
+
+# plot
+panelA = dat2plotA %>% ggline('perferror','self_fb',color='self_mu2',plot_type = 'l',size=1) + 
+  geom_point(aes(x=dataB.mri$performanceMean[1],y=20),size=2)+ 
+  geom_point(aes(x=dataB.mri$performanceMean[1],y=50),size=2)+ 
+  geom_point(aes(x=dataB.mri$performanceMean[1],y=80),size=2)+
+  scale_color_manual(values=c('#00FF00','#00CC00','#009900'),name = 'Mapping',labels=c('hard','medium','easy')) +
+  ylim(0,100) + ylab('Mapped self performance [points]') + xlab('Objective performance error [pixels]') + ggtitle('Mapping of self performance',subtitle = '(data from example participant)') +
+  theme_pubr(base_size = 14) + theme(legend.position = 'bottom',legend.direction = 'vertical',legend.text=element_text(size=14))
+
+# Panel B: illustrate staircasing for performance drifts
+dat2plotB = dataB.mri.w0AD %>% filter(game_number==1,ID==2,active_trial==0) %>% mutate(trialcounter = 1:n(),self_fb = self_feedback+60)
+panelB = dat2plotB %>% ggplot(aes(x=trialcounter)) + geom_point(aes(y=perferror_abs,color='Objective performance error [pixels]'),size=2) +
+  geom_point(aes(y=self_fb,color='Mapped self performance [points]'),size=2) +
+  ylab('Performance') + xlab('Trial') + theme(legend.position = 'right') + ylim(50,200)+
+  scale_color_manual(values=c('black','red'),name=element_blank()) + ggtitle('Staircasing of self performance',subtitle = '(data from example participant)') +
+  theme_pubr(base_size = 14) + theme(legend.position='bottom',legend.direction = 'vertical',legend.text=element_text(size=14))
+
+# plot both together
+ggarrange(panelA,panelB,ncol=2,align='h')
+#ggsave(file.path(path$figs,'Supplementals','FigX_task_selffeedback_raw.jpg'),width=10,height=6) 
+```
+
+
+# Demographics
+```{r}
+# included MRI subjects
+dataQ.mri %>% nrow() %>% paste0('Number of included subjects in MRI sample: ', .) %>% print()
+dataQ.mri %>% select(gender) %>% table()
+dataQ.mri %>% select(age) %>% range() %>% paste0(.,' years',collapse=' - ') %>% print()
+
+# included online - those we use for active disambiguation analyses
+dataQ.online %>% nrow() %>% paste0('Number of included subjects in Online sample - with ADs: ', .) %>% print()
+dataQ.online %>% select(Gender) %>% table()
+dataQ.online %>% select(Age) %>% range() %>% paste0(.,' years',collapse=' - ') %>% print()
+```
+[1] "Number of included subjects in MRI sample: 31"
+gender
+ F  M 
+22  9 
+[1] "18 years - 33 years"
+[1] "Number of included subjects in Online sample - with ADs: 36"
+Gender
+Diverse  Female    Male 
+      1      21      14 
+[1] "18 years - 40 years"
+
+
+# Overall ratings
+## Fig 2B: average ratings
+
+```{r,fig.height=5,fig.width=3.5}
+game2plot = 3
+
+p1 = dataB.mri %>% filter(game_number==game2plot) %>% 
+  group_by(game_number,game_trial) %>% dplyr::summarize(rate_total_mu = mean(rate_total), rate_total_sd = sd(rate_total), feedback_mu = unique(feedback_mu) ) %>% 
+  ggplot(., aes(x=game_trial)) + 
+  geom_line(aes(y=feedback_mu,color='Estimated\nfeedback',lty='Feedback')) + 
+  geom_line(aes(y=rate_total_mu,color='Estimated\nfeedback',lty='Estimated\nfeedback'),size=1) + 
+  geom_ribbon(aes(ymin=rate_total_mu-rate_total_sd,ymax=rate_total_mu+rate_total_sd,fill='Estimated\nfeedback'),alpha=0.2) +
+  xlab("Trial") + ylab('Feedback') + ylim(0,100) + ggtitle('Estimated feedback') +
+  scale_color_manual(NULL,values=c('black','black')) + scale_fill_manual(NULL,values=c('black','black')) + 
+  scale_linetype_manual(NULL,values=c(32,'solid'),breaks=c('Feedback','Estimated\nfeedback'),labels=c('True\nfeedback',element_blank())) + 
+  guides(color = guide_legend(order=1), fill=guide_legend(order=1),lty = guide_legend(order=2,override.aes = list(lty = NA))) + 
+  theme(legend.position = 'right', legend.box = "vertical",plot.title = element_text(hjust = 0.5,size=14),legend.justification = 'top',legend.box.margin=margin(-10,-10,-10,-20),legend.background=element_rect(fill='transparent'),legend.text=element_text(size=14))
+
+p2 = dataB.mri %>% filter(game_number==game2plot) %>% group_by(game_number,game_trial) %>% 
+  dplyr::summarize(self_mu=unique(self_mu),player_mu=ifelse(phase!=2,unique(player_mu),NA), control=ifelse(phase!=2,100*unique(control_level),NA),
+                   rate_selfsd = sd(rate_self),rate_othersd = sd(rate_other),rate_ctrlsd=100*sd(rate_ctrl ), # needs to come first as otherwise next line overwrites original data points
+                   rate_self = mean(rate_self),rate_other = mean(rate_other),rate_ctrl=100*mean(rate_ctrl )) %>% distinct() %>% mutate(game4plot = paste('Block',game_number)) %>%
+  ggplot(., aes(x=game_trial)) +     geom_vline(xintercept = 16.5,lty='dashed') + geom_vline(xintercept = 20.5,lty='dashed') + 
+  geom_ribbon(aes(ymin=rate_self-rate_selfsd,ymax=rate_self+rate_selfsd, fill='Self'),alpha=0.3) +  
+  geom_ribbon(aes(ymin=rate_other-rate_othersd,ymax=rate_other+rate_othersd, fill='Other'),alpha=0.3) +  
+  geom_ribbon(aes(ymin=rate_ctrl-rate_ctrlsd,ymax=rate_ctrl+rate_ctrlsd, fill='Control'),alpha=0.3) +
+  geom_line(aes(y=rate_self,color='Self',lty='Rating'),size=1) + geom_line(aes(y=rate_other,color='Other',lty='Rating'),size=1) + geom_line(aes(y=rate_ctrl,color='Control',lty='Rating'),size=1) + 
+  geom_line(aes(y=self_mu,color='Self',lty='Truth')) + geom_line(aes(y=player_mu+0.5,color='Other',lty='Truth')) + geom_line(aes(y=control-0.5,color='Control',lty='Truth')) +
+  ylab("Ratings") + xlab("Trial") + ggtitle('Individual ratings') + ylim(0,101) + # 101 bc otherwise player_mu=100 is cut off
+  scale_linetype_manual(NULL,values=c(32,'solid'),breaks=c('Truth','Rating'),labels=c('True level',element_blank())) + scale_color_manual(NULL,values=c(cols$Control,cols$Other,cols$Self)) + scale_fill_manual(NULL,values=c(cols$Control,cols$Other,cols$Self)) +
+  guides(color = guide_legend(order=1), fill=guide_legend(order=1),lty = guide_legend(order=2,override.aes=list(lty=NA)))+ 
+  theme(legend.position = 'right', legend.box = "vertical",plot.title = element_text(hjust = 0.5,size=14),legend.justification = 'top',legend.box.margin=margin(-10,-10,-10,-20),legend.background=element_rect(fill='transparent'),legend.text=element_text(size=14))
+
+# plot both together
+ggarrange(p1,p2,nrow=2,align='v')
+#ggsave(file.path(path$figs,'Fig02','Fig02BC.jpg'),width = 8.5,height=12,units = 'cm')
+#ggsave(file.path(path$figs,'Fig02','Fig02BC.svg'),width = 8.5,height=12,units = 'cm')
+```
+
+
+
+## Fig 2C: rating accuracy
+rate_total_err is relevant here - is predicted feedback substracted by true feedback
+I take the first and last trial predrift
+```{r, fig.width=6,fig.height=2.4}
+data2analyse = lapply(list(mri = dataB.mri,online = dataB.online), 
+                      function(.x) {
+                        .x %>% filter(phase%in%c(1,3),phase_trial%in%c(1,11)) %>% 
+                          mutate(phase_section      = ifelse(phase_trial<4,1,2),
+                                 rate_total_err_max = ifelse(feedback_mu<50,100 - feedback_mu, feedback_mu),
+                                 rate_total_acc     = 100 * (1 - rate_total_err / rate_total_err_max),
+                                 rate_self_err_max  = ifelse(self_mu<50,100 - self_mu, self_mu),
+                                 rate_self_acc      = ifelse(phase==1,100 * (1 - rate_self_err / rate_self_err_max),NA),
+                                 rate_other_err_max = ifelse(player_mu<50,100 - player_mu, player_mu),
+                                 rate_other_acc     = 100 * (1 - rate_other_err / rate_other_err_max),
+                                 rate_ctrl_err_max  = ifelse(control_level<0.5,1 - control_level, control_level),
+                                 rate_ctrl_acc      = 100 * (1 - rate_ctrl_err / rate_ctrl_err_max)) %>% group_by(ID,phase_section) %>% 
+                          dplyr::summarise(rate_total_acc = mean(rate_total_acc),
+                                           rate_self_acc  = mean(rate_self_acc,na.rm=T),
+                                           rate_other_acc = mean(rate_other_acc),
+                                           rate_ctrl_acc  = mean(rate_ctrl_acc,na.rm=T))
+                      }
+)
+data2plot = rbind(data2analyse$mri %>% mutate(Sample='MRI'), data2analyse$online %>% mutate(Sample='Online')) %>% mutate(ID=as.factor(ID),Sample=factor(Sample,levels=c('MRI','Online')))
+data2plot2 = data2plot %>% pivot_longer(.,cols=c('rate_total_acc','rate_self_acc','rate_other_acc','rate_ctrl_acc'),names_to='acc',values_to = 'value') %>%
+  mutate(acc_titles = ifelse(acc=='rate_ctrl_acc','Control',ifelse(acc=='rate_self_acc','Self',ifelse(acc=='rate_other_acc','Other',ifelse(acc=='rate_total_acc',' Estimated \nfeedback',NA))))) # space in ' Estimated\noutcome' is so that this panel comes first
+
+p = data2plot2 %>% ggerrorplot(.,'phase_section','value',desc_stat = 'mean_se',color='Sample',
+                               ylab='Rating accuracy [%]', xlab='Time in phase',ylim=c(30,120),size=0.5,
+                               add='jitter',add.params = list(alpha=0.5,size=0.1,shape=21,color='grey',fill='Sample')) + 
+  scale_x_discrete(labels=c("1" = "Start", "2" = "End"))+ scale_y_continuous(breaks=seq(40,100,20)) + scale_color_manual(values=c('black','darkgrey')) + scale_fill_manual(values=c('black','darkgrey')) +
+  # for adding stars for significance, we actually need an anova - but this function can't do it so I modify the significance levels of the used ttest to reflect the correct stars that I manually computed in the following chunk
+  geom_signif(comparisons = list(c("1", "2")), test.args = list(paired=T), map_signif_level=c("***"=0.001, "**"=0.01,"*"=0.05),y_position = 100,textsize = 7,vjust=0.5) +
+  theme_pubr(base_size=14) +theme(legend.position = 'right',legend.text=element_text(size=14),legend.box.margin=margin(0,-10,0,-20),axis.text.x = element_text(size=13))
+facet(p,facet.by = 'acc_titles',nrow=1,ncol=4,panel.labs.background = list(fill='white',color='white'),panel.labs.font=list(size=14))
+#ggsave(file.path(path$figs,'Fig02','Fig02D.jpg'),width = 14,height=6.5,units = 'cm')
+#ggsave(file.path(path$figs,'Fig02','Fig02D.svg'),width = 14,height=6.5,units = 'cm') 
+```
+
+do ratings improve over time?
+```{r}
+# A) TOTAL RATING ACCURACY
+# anova across samples: between = sample; within: time in block
+data4anova = data2plot %>% pivot_longer(cols = c('rate_total_acc','rate_self_acc','rate_other_acc','rate_ctrl_acc'),values_to = 'accuracy',names_to='ratingtype') %>% as.data.frame() %>% mutate(ID = ifelse(Sample=='Online',as.numeric(ID)+100,ID)) # make ID a unique number across samples
+rstatix::anova_test(data = data4anova%>%filter(ratingtype=='rate_total_acc'), dv = accuracy, wid = ID, within = phase_section, between = c(Sample))
+
+# B) CONTROL RATING
+# anova across samples: between = sample; within: time in block -> post-hoc ttests within sample not done bc no sign main effect or interaction with sample
+rstatix::anova_test(data = data4anova%>%filter(ratingtype=='rate_ctrl_acc'), dv = accuracy, wid = ID, within = phase_section, between = c(Sample)) 
+
+# C) OTHER RATING
+# anova across samples: between = sample; within: time in block
+rstatix::anova_test(data = data4anova%>%filter(ratingtype=='rate_other_acc'), dv = accuracy, wid = ID, within = phase_section, between = c(Sample))
+
+# D) SELF RATING
+# anova across samples: between = sample; within: time in block
+rstatix::anova_test(data = data4anova%>%filter(ratingtype=='rate_self_acc'), dv = accuracy, wid = ID, within = phase_section, between = c(Sample))
+```
+ANOVA Table (type III tests)
+
+Effect DFn DFd       F        p p<.05   ges
+1               Sample   1  65   6.255 1.50e-02     * 0.046
+2        phase_section   1  65 150.668 1.38e-18     * 0.535
+3 Sample:phase_section   1  65   0.634 4.29e-01       0.005
+ANOVA Table (type III tests)
+
+Effect DFn DFd      F        p p<.05   ges
+1               Sample   1  65  0.432 5.13e-01       0.003
+2        phase_section   1  65 38.374 4.47e-08     * 0.246
+3 Sample:phase_section   1  65  0.248 6.21e-01       0.002
+ANOVA Table (type III tests)
+
+Effect DFn DFd      F        p p<.05   ges
+1               Sample   1  65  2.328 1.32e-01       0.012
+2        phase_section   1  65 18.546 5.72e-05     * 0.159
+3 Sample:phase_section   1  65  1.639 2.05e-01       0.016
+ANOVA Table (type III tests)
+
+Effect DFn DFd      F     p p<.05   ges
+1               Sample   1  65  0.205 0.652       0.002
+2        phase_section   1  65 11.038 0.001     * 0.063
+3 Sample:phase_section   1  65  0.372 0.544       0.002
+
+test that accuracy of individual ratings don't increase as much as for the combined feedback
+```{r}
+# across samples
+data4anova2 = data2plot %>% mutate(ID = ifelse(Sample=='Online',as.numeric(ID)+100,ID)) 
+
+data4anova2.2 = data4anova2 %>% group_by(ID,phase_section) %>% 
+  pivot_wider(id_cols=c('ID','Sample'),names_from = 'phase_section',values_from = c(rate_total_acc,rate_self_acc, rate_other_acc, rate_ctrl_acc)) %>%
+  mutate(rate_total_diff = rate_total_acc_2 - rate_total_acc_1,
+         rate_self_diff  = rate_self_acc_2 - rate_self_acc_1,    rate_other_diff = rate_other_acc_2 - rate_other_acc_1,   rate_ctrl_diff = rate_ctrl_acc_2 - rate_ctrl_acc_1,
+         rate_indiv_diff = mean(c(rate_self_diff,rate_other_diff,rate_ctrl_diff))) %>%
+  pivot_longer(cols=c('rate_total_diff','rate_indiv_diff'),values_to='acc_diff',names_to='ratingtype') %>% as.data.frame()
+rstatix::anova_test(data4anova2.2, dv = 'acc_diff', wid="ID",within = 'ratingtype', between = c('Sample'))
+data4anova2.2 %>% group_by(ratingtype) %>% dplyr::summarise(mu = mean(acc_diff))# mean total vs individual rating accuracies
+```
+ANOVA Table (type III tests)
+
+Effect DFn DFd      F        p p<.05      ges
+1            Sample   1  65  0.553 4.60e-01       0.007000
+2        ratingtype   1  65 32.393 3.26e-07     * 0.075000
+3 Sample:ratingtype   1  65  0.043 8.37e-01       0.000107
+
+ratingtype mu
+rate_indiv_acc_mu	69.08369			
+tot_acc_mu	79.22779	
+
+ratingtype mu
+rate_indiv_diff	7.548344			
+rate_total_diff	12.403816			
+
+## Supplementary figure 3: average ratings in all blocks, both samples
+
+```{r}
+plot_ratings = function(data) {
+  data %>% group_by(game_number,game_trial) %>% 
+    dplyr::summarize(self_mu=unique(self_mu),player_mu=ifelse(phase!=2,unique(player_mu),NA), control=ifelse(phase!=2,100*unique(control_level),NA),
+                     rate_selfsd = sd(rate_self),rate_othersd = sd(rate_other),rate_ctrlsd=100*sd(rate_ctrl ), # needs to come first as otherwise next line overwrites original data points
+                     rate_self = mean(rate_self),rate_other = mean(rate_other),rate_ctrl=100*mean(rate_ctrl )) %>% distinct() %>% mutate(game4plot = paste('Block',game_number)) %>%
+    ggplot(., aes(x=game_trial)) + facet_wrap(~game_number,ncol = 4) +
+    geom_ribbon(aes(ymin=rate_self-rate_selfsd,ymax=rate_self+rate_selfsd, fill='Self'),alpha=0.3) +  
+    geom_ribbon(aes(ymin=rate_other-rate_othersd,ymax=rate_other+rate_othersd, fill='Other'),alpha=0.3) +  
+    geom_ribbon(aes(ymin=rate_ctrl-rate_ctrlsd,ymax=rate_ctrl+rate_ctrlsd, fill='Control'),alpha=0.3) +
+    geom_line(aes(y=rate_self,color='Self'),size=1) + geom_line(aes(y=rate_other,color='Other'),size=1) + geom_line(aes(y=rate_ctrl,color='Control'),size=1) + 
+    geom_line(aes(y=self_mu,color='Self'),lty=32) + geom_line(aes(y=player_mu+0.5,color='Other'),lty=32) + geom_line(aes(y=control-0.5,color='Control'),lty=32) +
+    ylab("Ratings") + xlab("Trial") + ggtitle('Individual ratings') + ylim(0,100) + 
+    scale_color_manual(NULL,values=c(cols$Control,cols$Other,cols$Self)) + scale_fill_manual(NULL,values=c(cols$Control,cols$Other,cols$Self)) +
+    guides(color = guide_legend(order=1), fill=guide_legend(order=1))+ 
+    theme(plot.title = element_text(size=16),legend.text=element_text(size=14))
+}
+plot_estfb = function(data) {
+  data %>% group_by(game_number,game_trial) %>% 
+    dplyr::summarize(rate_total_mu = mean(rate_total), rate_total_sd = sd(rate_total), feedback_mu = unique(feedback_mu) ) %>% 
+    ggplot(., aes(x=game_trial)) + facet_wrap(~game_number,ncol = 4) +
+    geom_line(aes(y=feedback_mu,color='Estimated\nfeedback'),lty=32) + 
+    geom_line(aes(y=rate_total_mu,color='Estimated\nfeedback'),size=1) + 
+    geom_ribbon(aes(ymin=rate_total_mu-rate_total_sd,ymax=rate_total_mu+rate_total_sd,fill='Estimated\nfeedback'),alpha=0.2) +
+    xlab("Trial") + ylab('Estimated feedback') + ylim(0,100) + ggtitle('Estimated feedback') +
+    scale_color_manual(NULL,values=c('black','black')) + scale_fill_manual(NULL,values=c('black','black')) + 
+    guides(color = guide_legend(order=1), fill=guide_legend(order=1)) + 
+    theme(plot.title = element_text(size=16),legend.text=element_text(size=14))
+}
+# plot both together
+ggarrange(ggarrange(dataB.mri%>%plot_ratings(.)+ggtitle('MRI: Individual ratings'),
+                    dataB.online%>%plot_ratings(.)+ggtitle('Online: Individual ratings'),common.legend=T,legend='right'),
+          ggarrange(dataB.mri%>%plot_estfb(.)+ggtitle('MRI: Estimated feedback') ,  
+                    dataB.online%>%plot_estfb(.)+ggtitle('Online: Estimated feedback'),common.legend = T,legend='right'),nrow=2)
+# save
+#ggsave(file.path(path$figs,'Supplementals','FigX_beh_avgratings_raw.jpg'),width = 34,height=15,units = 'cm')
+```
+
+# Active disambiguation
+## Fig 3C-D: AD in behaviour and debrief
+```{r,fig.width=5,fig.height=5}
+# 3Bi: Detected ADs across trials per phase
+data2plot = list(
+  mri = dataB.mri %>% group_by(ID,game_trial,phase) %>% dplyr::summarise(mu_ATs = mean(as.numeric(active_trial)-1)) %>% ungroup() %>% 
+    group_by(game_trial,phase) %>% dplyr::summarise(prop_ATsubs = 100 * sum(mu_ATs)/length(unique(dataB.mri$ID)), isuncphase=ifelse(phase==2,0,1)) %>% distinct(),
+  online = dataB.online %>% group_by(ID,game_trial,phase) %>% dplyr::summarise(mu_ATs = mean(as.numeric(active_trial)-1)) %>% ungroup() %>% 
+    group_by(game_trial,phase) %>% dplyr::summarise(prop_ATsubs = 100 * sum(mu_ATs)/length(unique(dataB.online$ID)), isuncphase=ifelse(phase==2,0,1)) %>% distinct())
+# plot mri participants in bars, online participants as dots
+p1 = data2plot$mri %>% ggplot(aes(x=game_trial,y=prop_ATsubs)) + geom_histogram(aes(fill=as.factor(isuncphase)),stat = 'identity') + 
+  geom_point(data = data2plot$online,aes(x=game_trial,y=prop_ATsubs,color=as.factor(isuncphase)),size=1.5,show.legend = F) +
+  geom_vline(xintercept=c(16.5,20.5), linetype='dashed') + 
+  scale_fill_manual('Sample',values=c("#1F4EAB",cols$AD),labels=c('MRI','Online'))+ scale_color_manual(values=c("#96A5BA",cols$ADL)) +
+  xlab("Trial") + ylab('AD [%]') + ylim(0,45) + 
+  guides(fill=guide_legend(override.aes=list(fill=NA))) + theme(legend.position='right',legend.text = element_text(size=14),legend.box.margin=margin(-10,-10,-10,-10)); 
+
+# plot with correlation between total number and reported number
+
+# MRI participants - include 3 subs again that we excluded bc no switch trials
+tmp1 = dataB.mri.w0AD %>% group_by(ID) %>% dplyr::summarise(Behaviour_number = length(which(active_trial==1)) / 4) 
+tmp2 = dataQ.mri.w0AD %>% select(ID,DQ.Q5) %>% mutate(Reported_number = as.numeric(DQ.Q5))
+dat2plot.mri = left_join(tmp1,tmp2,by='ID') %>% na.omit() %>% mutate(Sample='MRI')# 5 subs didn't have debrief so we removed them here -> from n=34 to n=29
+# for online plot, we don't want to exclude anyone who didn't do/report ADs - i.e. we include full sample of n=66 without exclusion
+tmp3 = dataB.online.w0AD %>% group_by(ID) %>% dplyr::summarise(Behaviour_number = length(which(active_trial==1)) / 4) 
+tmp4 = dataQ.online.w0AD %>% select(ID,DQ.ATFrq) %>% mutate(Reported_number = recode(DQ.ATFrq, 'Never' = -1, 'Less than once' = 0,'1'=1,'2'=2,'3'=3,'4'=4,'5'=5,'6'=6,'7'=7,'8'=8,'9'=9,'10'=10))  
+dat2plot.online = left_join(tmp3,tmp4,by='ID')%>% na.omit() %>% mutate(Sample='Online')# 2 subjects didn't answer question, so we have n=64
+# put together
+dat2plot = rbind(dat2plot.mri%>%select(-DQ.Q5), dat2plot.online%>%select(-DQ.ATFrq)) %>% mutate(Reported_number = ifelse(Sample=='MRI',Reported_number-0.1,Reported_number+0.1))
+# plot
+p2 = ggscatter(dat2plot,'Reported_number','Behaviour_number', fill='Sample', color='Sample',alpha='Sample',size=1, #add = 'reg.line',conf.int = T, #shape='Sample', 
+               xlab='Reported # AD trials',ylab='# AD trials in behaviour',position = position_jitter(width=0.03)) + 
+  stat_smooth(method=lm, aes(fill=Sample,color=Sample,linetype=Sample),fullrange = F) +
+  stat_cor(aes(color = Sample),method='spearman',show.legend = F,label.y=c(17,14),size=5,p.accuracy=0.001) +
+  scale_x_continuous(breaks=c(-1:11),label=c("Never     ","  Less\n  than once",1:10,"  More\nthan 10")) +
+  scale_color_manual(values=c(cols$AD,'darkgrey')) + scale_fill_manual(values=c(cols$AD,'grey')) + scale_alpha_manual(values=c(0.7,0.4)) +
+  guides(colour = guide_legend(override.aes = list(shape = NA))) + # remove dot from legend
+  theme_pubr(base_size=14) + theme(legend.position = 'right',legend.text = element_text(size=14),legend.box.margin=margin(-10,-10,-10,-10),axis.text.x=element_text(size=12)) #,
+
+# plot both together
+ggarrange(p1,p2,nrow=2,align='v')
+#ggsave(file.path(path$figs,'Fig03','Fig03B.jpg'),width = 14,height=12.6,units = 'cm') 
+#ggsave(file.path(path$figs,'Fig03','Fig03B.svg'),width = 14,height=12.6,units = 'cm') 
+
+# included subjects just for this plot
+dat2plot.mri$ID %>% unique() %>% length()
+dat2plot.online$ID %>% unique() %>% length()
+
+# get 95% CI for correlation reporting in text
+print('MRI sample')
+dat4cor = dat2plot %>% filter(Sample=='MRI')
+DescTools::SpearmanRho(dat4cor$Reported_number,dat4cor$Behaviour_number,conf.level = 0.95)
+print('ONLINE sample')
+dat4cor = dat2plot %>% filter(Sample=='Online')
+DescTools::SpearmanRho(dat4cor$Reported_number,dat4cor$Behaviour_number,conf.level = 0.95)
+
+# for supplementals: # mean proportion of AD 
+data2plot$online %>% filter(phase!=2) %>% ungroup() %>% summarise(mean_prop = mean(prop_ATsubs)) # 19.62%
+data2plot$mri %>% filter(phase!=2) %>% ungroup() %>% summarise(mean_prop = mean(prop_ATsubs)) # 27.39%
+```
+for bottom sample: 
+MRI has n=29, online has n=64
+
+*95% CIs*
+[1] "MRI sample"
+rho    lwr.ci    upr.ci 
+0.8085206 0.6281542 0.9064271 
+[1] "ONLINE sample"
+rho    lwr.ci    upr.ci 
+0.8468978 0.7591182 0.9044276 
+
+For reporting in text: get mean proportion of participants exploring in each phase (across trials)
+```{r}
+dataB.mri %>% group_by(ID,game_trial,phase) %>% dplyr::summarise(mu_ATs = mean(as.numeric(active_trial)-1)) %>% group_by(game_trial,phase) %>% dplyr::summarise(prop_ATsubs = 100 * sum(mu_ATs)/length(unique(dataB.mri$ID))) %>% 
+  group_by(phase) %>% summarise(mri_mu_prop = mean(prop_ATsubs))
+dataB.online %>% group_by(ID,game_trial,phase) %>% dplyr::summarise(mu_ATs = mean(as.numeric(active_trial)-1)) %>% group_by(game_trial,phase) %>% dplyr::summarise(prop_ATsubs = 100 * sum(mu_ATs)/length(unique(dataB.mri$ID))) %>% 
+  group_by(phase) %>% summarise(online_mu_prop = mean(prop_ATsubs))
+```
+
+MEan proportion of participants who explore in each phase:
+MRI:
+phase mu_prop
+1	25.453629			
+2	3.629032			
+3	29.334677	
+
+Online:
+phase mu_prop
+1	20.161290			
+2	2.419355			
+3	25.403226	
+
+## Supplementary Fig 9F: Debrief: Helpfulness of AD for ratings (online only)
+Overview which rating was rated as most helpful in debrief\
+
+figure
+```{r}
+dat2plot = dataQ.online %>% select(ID,DQ.ATSelf.num, DQ.ATOther.num, DQ.ATCtrl.num) %>% pivot_longer(cols=c('DQ.ATSelf.num', 'DQ.ATOther.num', 'DQ.ATCtrl.num')) %>% mutate(ID=as.factor(ID),rating_type = as.factor(ifelse(name=='DQ.ATSelf.num',1,ifelse(name=='DQ.ATOther.num',2,3))),name2 = as.factor(ifelse(name=='DQ.ATSelf.num','Self',ifelse(name=='DQ.ATOther.num','Other','Control'))))
+# participant numbers included
+dat2plot %>% pull(ID) %>% unique() %>% length() # n=36
+
+# plot rating in a pretty way
+dat2plot %>% ggboxplot(.,x='name2',y='value',xlab='',ylab='Rating',fill='name2', title='How did AD trials help you with the ratings?',orientation='horizontal') +
+  stat_compare_means(comparisons=list(c('Self','Other'),c('Self','Control'),c('Other','Control')),method='t.test',paired=T,label.y = c(6.1,6.9,6.4),label='p.signif',symnum.args=list(cutpoints = c(0, 0.001, 0.01, 0.05, 1), symbols = c("***", "**", "*", "ns"))) + 
+  scale_fill_manual(values = c('Self'=cols$SelfL, 'Other' = cols$OtherL, 'Control'=cols$ControlL)) +
+  scale_y_continuous(breaks=c(1:6),label=c("Not at all",'2','3','4','5',"Very much")) + theme_pubr(base_size=14) + theme(axis.title = element_blank(),legend.position = 'none')
+
+#ggsave(file.path(path$figs,'Fig04','Fig04C.jpg'),width = 14,height=5.6,units = 'cm') # conversion: do twice the image size you want to have for better resolution
+
+```
+
+
+stats
+```{r,fig.width=5,fig.height=2}
+# If you did badly on purpose, how did it help you with the ratings?
+dataQ.online %>% select(DQ.ATSelf.num, DQ.ATOther.num, DQ.ATCtrl.num) %>% psych::describe()
+dat4aov = dataQ.online %>% select(ID,DQ.ATSelf.num, DQ.ATOther.num, DQ.ATCtrl.num) %>% pivot_longer(cols=c('DQ.ATSelf.num', 'DQ.ATOther.num', 'DQ.ATCtrl.num')) %>% mutate(ID=as.factor(ID),rating_type = as.factor(ifelse(name=='DQ.ATSelf.num',1,ifelse(name=='DQ.ATOther.num',2,3))),name2 = as.factor(ifelse(name=='DQ.ATSelf.num','Self',ifelse(name=='DQ.ATOther.num','Other','Control'))))
+# ANOVA
+aov.DQ = ez::ezANOVA(dat4aov,dv = value,wid = ID,within=rating_type,detailed=T)
+print(aov.DQ)
+# t-test between ratings with cohens d
+t.test(dat4aov%>%filter(name=='DQ.ATSelf.num')%>%pull(value), dat4aov%>%filter(name=='DQ.ATOther.num')%>%pull(value),paired = T)
+t.test(dat4aov%>%filter(name=='DQ.ATSelf.num')%>%pull(value), dat4aov%>%filter(name=='DQ.ATCtrl.num')%>%pull(value),paired = T)
+t.test(dat4aov%>%filter(name=='DQ.ATOther.num')%>%pull(value), dat4aov%>%filter(name=='DQ.ATCtrl.num')%>%pull(value),paired = T)
+# cohens d
+rstatix::cohens_d(dat4aov, value ~ name,paired=T)
+```
+
+$ANOVA
+Effect DFn DFd        SSn       SSd        F            p p<.05       ges
+1 (Intercept)   1  35 1776.33333  96.33333 645.3806 3.851855e-24     * 0.8989794
+2 rating_type   2  70   40.05556 103.27778  13.5745 1.042531e-05     * 0.1671303
+
+$`Mauchly's Test for Sphericity`
+Effect         W          p p<.05
+2 rating_type 0.8719606 0.09737478      
+
+$`Sphericity Corrections`
+Effect       GGe        p[GG] p[GG]<.05       HFe        p[HF] p[HF]<.05
+2 rating_type 0.8864938 2.750259e-05         * 0.9303809 1.889367e-05         *
+
+
+Paired t-test
+
+data:  dat4aov %>% filter(name == "DQ.ATSelf.num") %>% pull(value) and dat4aov %>% filter(name == "DQ.ATOther.num") %>% pull(value)
+t = -3.2891, df = 35, p-value = 0.002297
+alternative hypothesis: true mean difference is not equal to 0
+95 percent confidence interval:
+-1.5273771 -0.3615118
+sample estimates:
+mean difference 
+-0.9444444 
+
+
+Paired t-test
+
+data:  dat4aov %>% filter(name == "DQ.ATSelf.num") %>% pull(value) and dat4aov %>% filter(name == "DQ.ATCtrl.num") %>% pull(value)
+t = -4.4982, df = 35, p-value = 7.229e-05
+alternative hypothesis: true mean difference is not equal to 0
+95 percent confidence interval:
+-2.1366627 -0.8077818
+sample estimates:
+mean difference 
+-1.472222 
+
+
+Paired t-test
+
+data:  dat4aov %>% filter(name == "DQ.ATOther.num") %>% pull(value) and dat4aov %>% filter(name == "DQ.ATCtrl.num") %>% pull(value)
+t = -2.2238, df = 35, p-value = 0.03271
+alternative hypothesis: true mean difference is not equal to 0
+95 percent confidence interval:
+-1.00959027 -0.04596528
+sample estimates:
+mean difference 
+-0.5277778 
+
+*cohens d*
+.y.   group1         group2         effsize    n1    n2 magnitude
+* <chr> <chr>          <chr>            <dbl> <int> <int> <ord>    
+1 value DQ.ATCtrl.num  DQ.ATOther.num   0.371    36    36 small    
+2 value DQ.ATCtrl.num  DQ.ATSelf.num    0.750    36    36 moderate 
+3 value DQ.ATOther.num DQ.ATSelf.num    0.548    36    36 moderate 
+
+
+
+## Supplementary figure 6: Avg estimates from computational models
+
+
+```{r,fig.height=4,fig.width=7}
+cols_learners = c("Ignorant learner"="#998EC3","Passive learner"="#92C5DE","Active learner"="#F4A582")
+dataB.all = rbind(dataB.mri%>%select(ID,game_number,phase,phase_trial,BL_self_mu,BL_ctrl_mu,BL_other_mu,IL_self_mu,IL_ctrl_mu,IL_other_mu,PL_self_mu,PL_ctrl_mu,PL_other_mu,self_mu,player_mu,control_level)%>%mutate(Sample='MRI',ID2=ID),
+                  dataB.online%>%select(ID,game_number,phase,phase_trial,BL_self_mu,BL_ctrl_mu,BL_other_mu,IL_self_mu,IL_ctrl_mu,IL_other_mu,PL_self_mu,PL_ctrl_mu,PL_other_mu,self_mu,player_mu,control_level)%>%mutate(Sample='Online',ID2=ID+100)) %>%
+  group_by(game_number,phase,phase_trial) %>% 
+  dplyr::summarize(self_mu=unique(self_mu), BL_selfmu = mean(BL_self_mu), IL_selfmu = mean(IL_self_mu), PL_selfmu = mean(PL_self_mu), BL_selfsd = sd(BL_self_mu), IL_selfsd = sd(IL_self_mu), PL_selfsd = sd(PL_self_mu),
+                   player_mu=unique(player_mu), BL_othermu = mean(BL_other_mu), IL_othermu = mean(IL_other_mu), PL_othermu = mean(PL_other_mu), BL_othersd = sd(BL_other_mu), IL_othersd = sd(IL_other_mu), PL_othersd = sd(PL_other_mu),
+                   control_level=unique(control_level), BL_ctrlmu = mean(BL_ctrl_mu), IL_ctrlmu = mean(IL_ctrl_mu), PL_ctrlmu = mean(PL_ctrl_mu), BL_ctrlsd = sd(BL_ctrl_mu), IL_ctrlsd = sd(IL_ctrl_mu), PL_ctrlsd = sd(PL_ctrl_mu)
+  ) %>% distinct()
+
+# plot with ratings in separate panels
+ggarrange(common.legend=T,legend='bottom',
+          dataB.all %>% filter(phase==1) %>% ggplot(., aes(x=phase_trial)) + 
+            geom_ribbon(aes(ymin=PL_selfmu-PL_selfsd,ymax=PL_selfmu+PL_selfsd, fill='Passive learner'),alpha=0.3) + geom_ribbon(aes(ymin=IL_selfmu-IL_selfsd,ymax=IL_selfmu+IL_selfsd, fill='Ignorant learner'),alpha=0.3) + 
+            geom_ribbon(aes(ymin=BL_selfmu-BL_selfsd,ymax=BL_selfmu+BL_selfsd, fill='Active learner'),alpha=0.3) + 
+            geom_line(aes(y=BL_selfmu,color='Active learner'),size=1) + geom_line(aes(y=IL_selfmu,color='Ignorant learner'),size=1) + geom_line(aes(y=PL_selfmu,color='Passive learner'),size=1) + geom_line(aes(y=self_mu),color='black') + 
+            ylim(-4,100) + scale_color_manual(values=cols_learners) + scale_fill_manual(values=cols_learners) +
+            facet_grid(~game_number)+ ylab("Estimates") + xlab("Trial") + ggtitle('Self in Self-Other phase') + labs(colour='Learner',fill='Learner')+theme(legend.text = element_text(size=14)),
+          dataB.all %>% filter(phase==1) %>% ggplot(., aes(x=phase_trial)) + 
+            geom_ribbon(aes(ymin=PL_othermu-PL_othersd,ymax=PL_othermu+PL_othersd, fill='Passive learner'),alpha=0.3) + geom_ribbon(aes(ymin=IL_othermu-IL_othersd,ymax=IL_othermu+IL_othersd, fill='Ignorant learner'),alpha=0.3) + 
+            geom_ribbon(aes(ymin=BL_othermu-BL_othersd,ymax=BL_othermu+BL_othersd, fill='Active learner'),alpha=0.3) + 
+            geom_line(aes(y=BL_othermu,color='Active learner'),size=1) + geom_line(aes(y=IL_othermu,color='Ignorant learner'),size=1) + geom_line(aes(y=PL_othermu,color='Passive learner'),size=1) + geom_line(aes(y=player_mu),color='black') + 
+            ylim(-4,100) + scale_color_manual(values=cols_learners) + scale_fill_manual(values=cols_learners) +
+            facet_grid(~game_number)+ ylab("Estimates") + xlab("Trial") + ggtitle('Other in Self-Other phase') + labs(colour='Learner',fill='Learner'),
+          dataB.all %>% filter(phase==3) %>% ggplot(., aes(x=phase_trial)) + 
+            geom_ribbon(aes(ymin=PL_ctrlmu-PL_ctrlsd,ymax=PL_ctrlmu+PL_ctrlsd, fill='Passive learner'),alpha=0.3) + geom_ribbon(aes(ymin=IL_ctrlmu-IL_ctrlsd,ymax=IL_ctrlmu+IL_ctrlsd, fill='Ignorant learner'),alpha=0.3) + 
+            geom_ribbon(aes(ymin=BL_ctrlmu-BL_ctrlsd,ymax=BL_ctrlmu+BL_ctrlsd, fill='Active learner'),alpha=0.3) + 
+            geom_line(aes(y=BL_ctrlmu,color='Active learner'),size=1) + geom_line(aes(y=IL_ctrlmu,color='Ignorant learner'),size=1) + geom_line(aes(y=PL_ctrlmu,color='Passive learner'),size=1) + geom_line(aes(y=control_level),color='black') + 
+            ylim(-0.07,1) + scale_color_manual(values=cols_learners) + scale_fill_manual(values=cols_learners) +
+            facet_grid(~game_number)+ ylab("Estimates") + xlab("Trial") + ggtitle('Control in Control-Other phase') + labs(colour='Learner',fill='Learner'),
+          dataB.all %>% filter(phase==3) %>% ggplot(., aes(x=phase_trial)) + 
+            geom_ribbon(aes(ymin=PL_othermu-PL_othersd,ymax=PL_othermu+PL_othersd, fill='Passive learner'),alpha=0.3) + geom_ribbon(aes(ymin=IL_othermu-IL_othersd,ymax=IL_othermu+IL_othersd, fill='Ignorant learner'),alpha=0.3) + 
+            geom_ribbon(aes(ymin=BL_othermu-BL_othersd,ymax=BL_othermu+BL_othersd, fill='Active learner'),alpha=0.3) + 
+            geom_line(aes(y=BL_othermu,color='Active learner'),size=1) + geom_line(aes(y=IL_othermu,color='Ignorant learner'),size=1) + geom_line(aes(y=PL_othermu,color='Passive learner'),size=1) + geom_line(aes(y=player_mu),color='black') + 
+            ylim(-4,100) + scale_color_manual(values=cols_learners) + scale_fill_manual(values=cols_learners) +
+            facet_grid(~game_number)+ ylab("Estimates") + xlab("Trial") + ggtitle('Other in Control-Other phase') + labs(colour='Learner',fill='Learner') 
+)
+
+#ggsave(file.path(path$figs,'Supplementals','FigX_compmodels_avgratings_raw.jpg'),width = 34,height=18,units = 'cm') 
+```
+
+
+## Supplementary figure 4c: AD performance in example participant
+```{r}
+dataB.mri %>% filter(ID==34,game_name=='rockslide') %>% ggplot(aes(x=PosXball,y=PosYball)) + geom_point(aes(fill=active_trial),color='black',shape=21,alpha=0.7,size=3) + 
+  scale_y_reverse(limits=c(600,0),expand=c(0,0)) + coord_fixed(ratio = 1) + scale_x_continuous(limits=c(0,800),expand=c(0,0)) +
+  scale_fill_manual(values=c('#2F5597','orange'),name='Trial type',labels=c('Normal','AD')) +
+  xlab('Ball position X [pixels]') + ylab('Ball position Y [pixels]') + ggtitle('Ball position at response',subtitle = '(data from example participant)') + 
+  theme_pubr(base_size=14) +
+  theme(legend.position = 'right',legend.text = element_text(size=14),
+        panel.background = element_rect(fill='transparent'), #transparent panel bg
+        plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+        legend.background = element_rect(fill='transparent',color=NA), #transparent legend bg
+        legend.box.background = element_rect(fill='transparent',color=NA) #transparent legend panel
+  )
+
+#ggsave(file.path(path$figs,'Supplementals','FigX_task_AD_in_rockslide_s66.png'),width = 15,height=10,units = 'cm') 
+```
+
+## Supplementary figure 8: Uncertainty dynamics
+
+```{r}
+lapply(c(list.files(file.path(path$save,'indivs_mri','all_subs'),pattern='_unc_AT12_drift.p',full.names = T),list.files(file.path(path$save,'indivs_online','all_subs'),pattern='_unc_AT12_drift.p',full.names = T)),load,.GlobalEnv)
+transform4plot = function(data) {
+  data = data %>% rename(AT1=active_1after1,AT2=active_2after1 ) %>% pivot_longer(cols=c(AT1,AT2,phase_trial,player_mu_drift1,phase),values_to=beta2plot,names_to = 'regressor')
+  return(data)
+}
+unc2plot.avg13upd  = rbind(fit_avg_unc_AT12_drift.p13.mri[[df2plot]]      %>% transform4plot() %>% mutate(Sample='MRI'),     fit_avg_unc_AT12_drift.p13.online[[df2plot]]   %>% transform4plot() %>% mutate(Sample='Online')) 
+# uncertainty from start to finish, plotted like figure 2d
+data2plot = rbind(dataB.mri %>% select(ID,game_number,phase,phase_trial,game_trial,BL_avg_unc,BL_self_unc,BL_other_unc,BL_ctrl_unc) %>% mutate(Sample='MRI'), 
+                  dataB.online %>% select(ID,game_number,phase,phase_trial,game_trial,BL_avg_unc,BL_self_unc,BL_other_unc,BL_ctrl_unc) %>% mutate(Sample='Online')) %>% 
+  filter(phase!=2,phase_trial%in%c(1,11)) %>% 
+  mutate(ID=as.factor(ID),Sample=factor(Sample,levels=c('MRI','Online')),phase_section=ifelse(phase_trial==1,1,2),BL_ctrl_unc=100*BL_ctrl_unc)  %>%
+  select(-phase,-phase_trial,-game_trial,-game_number) %>%
+  group_by(ID,Sample,phase_section) %>% dplyr::summarise(BL_avg_unc = mean(BL_avg_unc), BL_self_unc = mean(BL_self_unc,na.rm=T), BL_other_unc = mean(BL_other_unc), BL_ctrl_unc = mean(BL_ctrl_unc,na.rm=T)) %>% ungroup()
+data2plot2 = data2plot %>% pivot_longer(.,cols=contains('unc'),names_to='unc',values_to = 'value') %>%
+  mutate(unc_titles = ifelse(unc=='BL_ctrl_unc','Control uncertainty',ifelse(unc=='BL_self_unc','Self uncertainty',ifelse(unc=='BL_other_unc','Other uncertainty',ifelse(unc=='BL_avg_unc','Averaged uncertainty',NA)))))
+
+# plot
+lbls=c('AT1' = '1 trial\nafter AD', 'AT2' = '2 trials\nafter AD','phase_trial'='Trial','player_mu_drift1'='Other changed\nwithin phase','phase'='Task phase')
+p1 = data2plot2 %>% ggerrorplot(.,'phase_section','value',desc_stat = 'mean_se',color='Sample',
+                                ylab='Uncertainty', xlab='Time in phase',size=0.5,
+                                add='jitter',add.params = list(alpha=0.5,size=0.1,shape=21,color='grey',fill='Sample')) + 
+  scale_x_discrete(labels=c("1" = "Start", "2" = "End"))+scale_color_manual(values=c('black','darkgrey')) + scale_fill_manual(values=c('black','darkgrey')) + scale_y_continuous(breaks=seq(0,120,25),limits = c(0,120)) +
+  # for adding stars for significance, we actually need an anova - but this function can't do it so I modify the significance levels of the used ttest to reflect the correct stars that I manually computed in the following chunk
+  geom_signif(comparisons = list(c("1", "2")), test.args = list(paired=T), map_signif_level=c("***"=0.001, "**"=0.01,"*"=0.05),y_position = 110,textsize = 7,vjust=0.5) +
+  theme_pubr(base_size=14) +theme(legend.position = 'right',legend.text=element_text(size=14),axis.text.x = element_text(size=13),strip.text.x = element_text(size=14)) +
+  facet_wrap(~unc_titles,nrow=1,ncol=4,strip.position = 'top',labeller = label_wrap_gen(width = 20))
+p2 = rbind(
+  dataB.mri %>% select(ID,game_number,phase,phase_trial,game_trial,BL_avg_unc,BL_self_unc,BL_other_unc,BL_ctrl_unc),
+  dataB.online %>% select(ID,game_number,phase,phase_trial,game_trial,BL_avg_unc,BL_self_unc,BL_other_unc,BL_ctrl_unc)
+) %>%
+  group_by(game_number,phase,game_trial) %>% 
+  dplyr::summarise(BL_avg_unc = mean(BL_avg_unc), BL_self_unc = mean(BL_self_unc), BL_other_unc = mean(BL_other_unc), BL_ctrl_unc = 100*mean(BL_ctrl_unc), 
+                   BL_avg_sd  = sd(BL_avg_unc),   BL_self_sd  = sd(BL_self_unc),   BL_other_sd  = sd(BL_other_unc),   BL_ctrl_sd  = 100*sd(BL_ctrl_unc)) %>% distinct() %>%
+  ggplot(aes(x=game_trial)) + 
+  geom_line(aes(y=BL_self_unc,color='Self'),size=1) + geom_line(aes(y=BL_other_unc,color='Other'),size=1) + geom_line(aes(y=BL_ctrl_unc,color='Control'),size=1) + geom_line(aes(y=BL_avg_unc,color='Averaged'),size=1) + 
+  facet_grid(~game_number)+ ylab("Uncertainty") + xlab("Trial") + labs(colour='Uncertainty') +
+  geom_vline(xintercept=c(16.5,20.5), linetype='dashed') + 
+  scale_color_manual(values=c('Self'=cols$Self, 'Other' = cols$Other, 'Control'=cols$Control, 'Averaged' = 'black')) +
+  theme_pubr(base_size=14) + theme(legend.text = element_text(size=14),legend.position='right',strip.text.x = element_text(size=14))
+p3 = unc2plot.avg13upd %>%
+  ggbarplot(.,'regressor','beta_estimate',add=c('mean_se','jitter'),fill='Sample',ylab='Effect on uncertainty',position = position_dodge(0.75),add.params=list(size='Sample',alpha=0.1,show.legend=F)) + 
+  geom_hline(yintercept = 0) + geom_text(aes(family='Courier'),x = 'AT1', y = -1.4,label='***',size=5) + geom_text(aes(family='Courier'),x = 'AT2', y = -1.4,label='***',size=5) + 
+  geom_text(aes(family='Courier'),x = 'phase_trial', y = -1.4,label='***',size=5) + geom_text(aes(family='Courier'),x = 'player_mu_drift1', y = 1.4,label='***',size=5) + 
+  scale_x_discrete(labels=lbls) + scale_fill_manual(values = c(cols$AD,cols$ADL)) + scale_size_manual(values=c(0.8,0.8)) +
+  theme_pubr(base_size=14)+theme(legend.position = 'right', axis.title.x = element_blank(),legend.box.margin=margin(-10,-10,-10,-10), legend.text = element_text(size=14))
+ggarrange(p1,p2,'',p3,nrow=4,heights=c(1,1,0.2,0.8))
+
+#ggsave(file.path(path$figs,'Supplementals','FigX_compmodels_uncertainty_raw_revision-1.jpg'),width = 28,height=25,units = 'cm')
+```
+Same significance tests as for figure 2d
+```{r}
+# A) Averaged uncertainty
+# anova across samples: between = sample; within: time in block
+data4anova = data2plot %>% pivot_longer(cols = contains('unc'),values_to = 'uncertainty',names_to='utype') %>% as.data.frame() %>% mutate(ID = ifelse(Sample=='Online',as.numeric(ID)+200,ID),phase_section=as.factor(phase_section)) # make ID a unique number across samples
+print('AVG UNCERTAINTY'); rstatix::anova_test(data = data4anova%>%filter(utype=='BL_avg_unc'), dv = uncertainty, wid = ID, within=phase_section,between = Sample)
+
+# Self 
+# anova across samples: between = sample; within: time in block -> post-hoc ttests within sample not done bc no sign main effect or interaction with sample
+print("SELF UNCERTAINTY");rstatix::anova_test(data = data4anova%>%filter(utype=='BL_self_unc'), dv = uncertainty, wid = ID, within = phase_section, between = c(Sample)) 
+
+# OTHER 
+# anova across samples: between = sample; within: time in block
+print("OTHER UNCERTAINTY");rstatix::anova_test(data = data4anova%>%filter(utype=='BL_other_unc'), dv = uncertainty, wid = ID, within = phase_section, between = c(Sample))
+
+# Ctrl RAING
+# anova across samples: between = sample; within: time in block
+print("CTRL UNCERTAINTY");rstatix::anova_test(data = data4anova%>%filter(utype=='BL_ctrl_unc'), dv = uncertainty, wid = ID, within = phase_section, between = c(Sample))
+```
+[1] "AVG UNCERTAINTY"
+ANOVA Table (type III tests)
+
+Effect DFn DFd        F        p p<.05   ges
+1               Sample   1  65    6.719 1.20e-02     * 0.049
+2        phase_section   1  65 7103.739 4.11e-68     * 0.982
+3 Sample:phase_section   1  65    6.719 1.20e-02     * 0.049
+[1] "SELF UNCERTAINTY"
+ANOVA Table (type III tests)
+
+Effect DFn DFd         F        p p<.05   ges
+1               Sample   1  65     1.545 2.18e-01       0.012
+2        phase_section   1  65 10184.586 3.69e-73     * 0.987
+3 Sample:phase_section   1  65     1.545 2.18e-01       0.012
+[1] "OTHER UNCERTAINTY"
+ANOVA Table (type III tests)
+
+Effect DFn DFd        F        p p<.05   ges
+1               Sample   1  65   10.856 2.00e-03     * 0.077
+2        phase_section   1  65 6249.368 2.54e-66     * 0.980
+3 Sample:phase_section   1  65   10.856 2.00e-03     * 0.077
+[1] "CTRL UNCERTAINTY"
+ANOVA Table (type III tests)
+
+Effect DFn DFd        F        p p<.05   ges
+1               Sample   1  65    2.606 1.11e-01       0.039
+2        phase_section   1  65 3807.873 2.02e-59     * 0.983
+3 Sample:phase_section   1  65    2.606 1.11e-01       0.039
+
+## Supplementary figure 7: Correlations between true levels and uncertainties
+```{r}
+rbind(
+  dataB.mri %>% filter(phase!=2) %>% select(BL_self_unc,BL_other_unc,BL_ctrl_unc,BL_avg_unc,self_mu,player_mu,control_level,feedback),
+  dataB.online %>% filter(phase!=2) %>% select(BL_self_unc,BL_other_unc,BL_ctrl_unc,BL_avg_unc,self_mu,player_mu,control_level,feedback))%>%
+  rename(`Control uncertainty` = BL_ctrl_unc, `Other uncertainty` = BL_other_unc, `Self uncertainty` = BL_self_unc, `Uncertainty` = BL_avg_unc, 
+         `True control level` = control_level, `True self performance level` = self_mu, `True other performance level` = player_mu, `Feedback` = feedback) %>%
+  cor(use = 'pairwise.complete.obs') %>% round(2) %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F)
+#ggsave(file.path(path$figs,'Supplementals','FigX_task_correlations_raw_revision-1.jpg'),width = 15,height=15,units = 'cm')
+```
+
+## Supplementary figure 11: rating accuracies and AD over task blocks
+
+```{r}
+# prep accuracy data
+compute_accuracies = function(data) {
+  data %>% mutate(rate_self_err_max  = ifelse(self_mu<50,100 - self_mu, self_mu),
+                  rate_self_acc      = ifelse(phase==1,100 * (1 - rate_self_err / rate_self_err_max),NA),
+                  rate_other_err_max = ifelse(player_mu<50,100 - player_mu, player_mu),
+                  rate_other_acc     = 100 * (1 - rate_other_err / rate_other_err_max),
+                  rate_ctrl_err_max  = ifelse(control_level<0.5,1 - control_level, control_level),
+                  rate_ctrl_acc      = 100 * (1 - rate_ctrl_err / rate_ctrl_err_max))
+}
+dataB.mri = compute_accuracies(dataB.mri); dataB.online = compute_accuracies(dataB.online)
+dataB.all4plot.acc = rbind(dataB.mri %>% select(ID,game_number,phase,phase_trial,rate_self_acc,rate_other_acc,rate_ctrl_acc) %>% mutate(Sample='MRI'),
+                           dataB.online %>% select(ID,game_number,phase,phase_trial,rate_self_acc,rate_other_acc,rate_ctrl_acc) %>% mutate(Sample='Online')) %>%
+  filter(phase_trial==16) %>% 
+  group_by(ID,game_number,Sample) %>% mutate(rate_other_acc_mu = mean(rate_other_acc,na.rm=T)) %>%
+  pivot_longer(cols=c(rate_self_acc,rate_other_acc,rate_ctrl_acc,rate_other_acc_mu),names_to='Accuracy',values_to='rating_accuracy') %>%
+  filter((phase==1 & Accuracy=='rate_self_acc') | (phase==3 & Accuracy=='rate_ctrl_acc') | (phase==1 & Accuracy=='rate_other_acc_mu')) %>%
+  mutate(Accuracy = ifelse(Accuracy=='rate_self_acc','Self',ifelse(Accuracy=='rate_other_acc_mu','Other','Control')),
+         ID = ifelse(Sample=='Online',as.numeric(ID)+100,ID))%>%as.data.frame()
+# prep AD plot
+compute_prop_AD = function(data) {
+  data %>% group_by(ID,game_number) %>% dplyr::summarise(n_AD = sum(as.numeric(active_trial)-1) ,prop_AD = 100 * n_AD / 36) # 36 trials per game
+}
+dataB.all4plot.AD = rbind(compute_prop_AD(dataB.mri)%>%mutate(Sample='MRI'), compute_prop_AD(dataB.online)%>%mutate(Sample='Online')) %>% mutate(ID = ifelse(Sample=='Online',as.numeric(ID)+100,ID)) %>% as.data.frame() 
+
+# plot 
+p1 = dataB.all4plot.acc %>% 
+  ggplot(aes(x=game_number)) + 
+  geom_point(aes(y=rating_accuracy,color=Accuracy),size=0.5,alpha=0.2,position = position_dodge(0.75)) +
+  ylab('Rating accuracy [%]') + xlab('Task block') + labs(fill='Rating type') +
+  stat_summary(aes(y=rating_accuracy,color=Accuracy),geom='pointrange',position = position_dodge(0.75),fun.data=mean_se) +
+  stat_summary(aes(y=rating_accuracy,color=Accuracy),geom='line',position = position_dodge(0.75),fun=mean) +
+  scale_color_manual(values=c('Self'=cols$Self, 'Other' = cols$Other, 'Control'=cols$Control)) + theme_pubr(base_size=14) + theme(legend.position='bottom')
+p2 = dataB.all4plot.AD %>% 
+  ggplot(aes(x=game_number)) + 
+  geom_point(aes(y=prop_AD),size=0.5,alpha=0.2,position = position_dodge(0.75),color=cols$AD) +
+  ylab('Proportion of AD trials [%]') + xlab('Task block') + labs(fill='Rating type') +
+  stat_summary(aes(y=prop_AD),fun.data = mean_se, geom = "pointrange",color=cols$AD) +
+  stat_summary(aes(y=prop_AD),geom='line',position = position_dodge(0.75),fun=mean,color=cols$AD) + theme_pubr(base_size=14)
+ggarrange(p1,p2,ncol=2,widths=c(2,1),align='h',labels='AUTO',font.label = list(size=22))
+#ggsave(file.path(path$figs,'Supplementals','FigX_beh_acc_AD_over_blocks_revision-1.jpg'),width = 28,height=12,units = 'cm')
+
+# anova
+print('Self rating accuracy'); rstatix::anova_test(data = dataB.all4plot.acc%>%filter(Accuracy=='Self'), dv = rating_accuracy, wid = ID, within = game_number, between = c(Sample))
+print('Other rating accuracy'); rstatix::anova_test(data = dataB.all4plot.acc%>%filter(Accuracy=='Other'), dv = rating_accuracy, wid = ID, within = game_number, between = c(Sample))
+print('Control rating accuracy'); rstatix::anova_test(data = dataB.all4plot.acc%>%filter(Accuracy=='Control'), dv = rating_accuracy, wid = ID, within = game_number, between = c(Sample))
+print('AD proportion'); rstatix::anova_test(data = dataB.all4plot.AD, dv = prop_AD, wid = ID, within = game_number, between = c(Sample))
+
+# post-hoc t-tests comparing accuracies of first and last game block
+print("Self rating accuracy"); t.test(dataB.all4plot.acc %>% filter(Accuracy=='Self',game_number==4)%>%pull(rating_accuracy),dataB.all4plot.acc %>% filter(Accuracy=='Self',game_number==1)%>%pull(rating_accuracy),paired = T)
+print("Other rating accuracy"); t.test(dataB.all4plot.acc %>% filter(Accuracy=='Other',game_number==4)%>%pull(rating_accuracy),dataB.all4plot.acc %>% filter(Accuracy=='Other',game_number==1)%>%pull(rating_accuracy),paired = T)
+print("Control rating accuracy"); t.test(dataB.all4plot.acc %>% filter(Accuracy=='Control',game_number==4)%>%pull(rating_accuracy),dataB.all4plot.acc %>% filter(Accuracy=='Control',game_number==1)%>%pull(rating_accuracy),paired = T)
+```
+
+[1] "Self rating accuracy"
+ANOVA Table (type III tests)
+
+$ANOVA
+Effect DFn DFd      F        p p<.05   ges
+1             Sample   1  65  0.530 4.69e-01       0.002
+2        game_number   3 195 59.499 2.35e-27     * 0.401
+3 Sample:game_number   3 195  0.887 4.49e-01       0.010
+
+$`Mauchly's Test for Sphericity`
+Effect     W     p p<.05
+1        game_number 0.816 0.024     *
+2 Sample:game_number 0.816 0.024     *
+
+$`Sphericity Corrections`
+Effect   GGe       DF[GG]    p[GG] p[GG]<.05   HFe       DF[HF]    p[HF] p[HF]<.05
+1        game_number 0.872 2.62, 170.04 3.54e-24         * 0.912 2.74, 177.81 3.63e-25         *
+2 Sample:game_number 0.872 2.62, 170.04 4.37e-01           0.912 2.74, 177.81 4.41e-01          
+
+[1] "Other rating accuracy"
+ANOVA Table (type III tests)
+
+$ANOVA
+Effect DFn DFd      F        p p<.05   ges
+1             Sample   1  65  2.026 1.59e-01       0.006
+2        game_number   3 195 35.983 1.49e-18     * 0.308
+3 Sample:game_number   3 195  4.738 3.00e-03     * 0.055
+
+$`Mauchly's Test for Sphericity`
+Effect     W        p p<.05
+1        game_number 0.635 2.38e-05     *
+2 Sample:game_number 0.635 2.38e-05     *
+
+$`Sphericity Corrections`
+Effect   GGe       DF[GG]    p[GG] p[GG]<.05   HFe       DF[HF]    p[HF] p[HF]<.05
+1        game_number 0.789 2.37, 153.83 3.84e-15         * 0.821 2.46, 160.02 1.18e-15         *
+2 Sample:game_number 0.789 2.37, 153.83 7.00e-03         * 0.821 2.46, 160.02 6.00e-03         *
+
+[1] "Control rating accuracy"
+ANOVA Table (type III tests)
+
+$ANOVA
+Effect DFn DFd      F        p p<.05   ges
+1             Sample   1  65  2.161 1.46e-01       0.007
+2        game_number   3 195 11.357 6.74e-07     * 0.119
+3 Sample:game_number   3 195  0.738 5.31e-01       0.009
+
+$`Mauchly's Test for Sphericity`
+Effect     W        p p<.05
+1        game_number 0.685 0.000211     *
+2 Sample:game_number 0.685 0.000211     *
+
+$`Sphericity Corrections`
+Effect   GGe      DF[GG]    p[GG] p[GG]<.05   HFe       DF[HF]    p[HF] p[HF]<.05
+1        game_number 0.799 2.4, 155.77 6.42e-06         * 0.832 2.49, 162.14 4.45e-06         *
+2 Sample:game_number 0.799 2.4, 155.77 5.03e-01           0.832 2.49, 162.14 5.08e-01          
+
+[1] "AD proportion"
+ANOVA Table (type III tests)
+
+$ANOVA
+Effect DFn DFd     F     p p<.05     ges
+1             Sample   1  65 5.457 0.023     * 0.05600
+2        game_number   3 195 0.149 0.930       0.00067
+3 Sample:game_number   3 195 2.052 0.108       0.00900
+
+$`Mauchly's Test for Sphericity`
+Effect     W     p p<.05
+1        game_number 0.818 0.025     *
+2 Sample:game_number 0.818 0.025     *
+
+$`Sphericity Corrections`
+Effect   GGe       DF[GG] p[GG] p[GG]<.05   HFe      DF[HF] p[HF] p[HF]<.05
+1        game_number 0.884 2.65, 172.29 0.912           0.925 2.77, 180.3 0.919          
+2 Sample:game_number 0.884 2.65, 172.29 0.116           0.925 2.77, 180.3 0.113
+
+[1] "Self rating accuracy"
+
+Paired t-test
+
+data:  dataB.all4plot.acc %>% filter(Accuracy == "Self", game_number == 4) %>% pull(rating_accuracy) and dataB.all4plot.acc %>% filter(Accuracy == "Self", game_number == 1) %>% pull(rating_accuracy)
+t = 10.381, df = 66, p-value = 1.646e-15
+alternative hypothesis: true mean difference is not equal to 0
+95 percent confidence interval:
+23.28643 34.37663
+sample estimates:
+mean difference 
+28.83153 
+
+[1] "Other rating accuracy"
+
+Paired t-test
+
+data:  dataB.all4plot.acc %>% filter(Accuracy == "Other", game_number == 4) %>% pull(rating_accuracy) and dataB.all4plot.acc %>% filter(Accuracy == "Other", game_number == 1) %>% pull(rating_accuracy)
+t = -5.5701, df = 66, p-value = 5.047e-07
+alternative hypothesis: true mean difference is not equal to 0
+95 percent confidence interval:
+-26.61738 -12.57071
+sample estimates:
+mean difference 
+-19.59405 
+
+[1] "Control rating accuracy"
+
+Paired t-test
+
+data:  dataB.all4plot.acc %>% filter(Accuracy == "Control", game_number == 4) %>% pull(rating_accuracy) and dataB.all4plot.acc %>% filter(Accuracy == "Control", game_number == 1) %>% pull(rating_accuracy)
+t = 4.2742, df = 66, p-value = 6.307e-05
+alternative hypothesis: true mean difference is not equal to 0
+95 percent confidence interval:
+11.18844 30.80410
+sample estimates:
+mean difference 
+20.99627 
