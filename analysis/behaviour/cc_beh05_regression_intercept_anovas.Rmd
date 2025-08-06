@@ -1,0 +1,390 @@
+---
+title: "ANOVAs  of previous regression results"
+output: html_notebook
+---
+
+In this script, I do some ANOVAs for the previous scripts' regression results (script 03 and 04)
+
+*These are only ANOVAs where I want to compare effect to 0* -> for this we test intercept against 0 and need to switch to effect coding
+
+IMPORTANT: THIS SCRIPT IS BEST EXECUTED IN A FRESH R WINDOW & CLOSED AFTER ANOVAs WERE RUN!
+
+It's important that these are in a new script because for doing the anovas, I often look at the intercept effects compared to 0.
+In order to achieve this, I need to change R's contrast setting from treatment to effect coding with this command: 
+options(contrasts=c("contr.sum","contr.poly"))
+- HOWEVER, this changes the contrast setting of factors in all stats that I do 
+
+```{r,include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(foreach);library(doParallel)
+
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors
+
+# load MRI & online data
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online
+
+# switch to effect coding
+options(contrasts=c("contr.sum","contr.poly"))
+```
+
+# Script 03: Fig 2e, People split up PE to self other by weighing it with control, Self-Other phase
+
+ANOVA test: test whether intercept is different from 0 so that overall beta estimate across samples is sign
+ges = Generalized Eta-Squared measure of effect size
+
+```{r}
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='_upd_PE_wdrift.p1',full.names = T),load,.GlobalEnv)
+
+# put online and mri sample results together in one data frame
+self2plot.p1  = rbind(
+  fit_self_upd_PE_wdrift.p1.mri[[df2plot]] %>% rename(total_PE=total_PE_signed_prev,total_PE.Ctrl=`total_PE_signed_prev:control_level`,Ctrl=control_level) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.Ctrl','Ctrl'),values_to=beta2plot,names_to = 'regressor') %>% mutate(sample='mri'),
+  fit_self_upd_PE_wdrift.p1.online[[df2plot]] %>% rename(total_PE=total_PE_signed_prev,total_PE.Ctrl=`total_PE_signed_prev:control_level`,Ctrl=control_level) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.Ctrl','Ctrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='online'))
+other2plot.p1  = rbind(
+  fit_other_upd_PE_wdrift.p1.mri[[df2plot]] %>% rename(total_PE=total_PE_signed_prev,total_PE.OCtrl=`total_PE_signed_prev:control_level_other`,OCtrl=control_level_other) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.OCtrl','OCtrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='mri'),
+  fit_other_upd_PE_wdrift.p1.online[[df2plot]] %>% rename(total_PE=total_PE_signed_prev,total_PE.OCtrl=`total_PE_signed_prev:control_level_other`,OCtrl=control_level_other) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.OCtrl','OCtrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='online'))
+BLself2plot.p1  = rbind(
+  fit_BLself_upd_PE_wdrift.p1.mri[[df2plot]]    %>% rename(total_PE=BL_total_PE_signed_prev,total_PE.Ctrl=`BL_total_PE_signed_prev:control_level`,Ctrl=control_level) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.Ctrl','Ctrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='mri'),
+  fit_BLself_upd_PE_wdrift.p1.online[[df2plot]] %>% rename(total_PE=BL_total_PE_signed_prev,total_PE.Ctrl=`BL_total_PE_signed_prev:control_level`,Ctrl=control_level) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.Ctrl','Ctrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='online'))
+BLother2plot.p1  = rbind(
+  fit_BLother_upd_PE_wdrift.p1.mri[[df2plot]]    %>% rename(total_PE=BL_total_PE_signed_prev,total_PE.OCtrl=`BL_total_PE_signed_prev:control_level_other`,OCtrl=control_level_other) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.OCtrl','OCtrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='mri'),
+  fit_BLother_upd_PE_wdrift.p1.online[[df2plot]] %>% rename(total_PE=BL_total_PE_signed_prev,total_PE.OCtrl=`BL_total_PE_signed_prev:control_level_other`,OCtrl=control_level_other) %>% 
+    pivot_longer(cols=c('total_PE','total_PE.OCtrl','OCtrl'),values_to=beta2plot,names_to = 'regressor')  %>% mutate(sample='online'))
+
+# stats with ANOVA - group: sample
+dat4aov = rbind(self2plot.p1 %>% select(ID,beta_estimate,regressor,sample) %>% mutate(type='self'), 
+                other2plot.p1 %>% select(ID,beta_estimate,regressor,sample) %>% mutate(type='other')) %>% 
+  mutate(sample = as.factor(sample),type=as.factor(type), ID.new = ifelse(sample=='mri',ID,ID+max(dataB.mri$ID)) %>% as.factor()) # we need to reindex the IDs of participants bc the mri and online sample have the same => we add highest ID from mri sample
+betas2test = list(self = c('total_PE','total_PE.Ctrl','Ctrl'),    other = c('total_PE','total_PE.OCtrl','OCtrl'))
+for (rating in names(betas2test)) {
+  for (beta in betas2test[[rating]]) {
+    print(paste('SUBJECTS -',rating, '-', beta))
+    ez::ezANOVA(dat4aov%>%filter(regressor==beta,type==rating),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+  }
+}
+
+# now stats for Bayesian learner
+dat4aov = rbind(BLself2plot.p1 %>% select(ID,beta_estimate,regressor,sample) %>% mutate(type='self'), 
+                BLother2plot.p1 %>% select(ID,beta_estimate,regressor,sample) %>% mutate(type='other')) %>% 
+  mutate(sample = as.factor(sample),type=as.factor(type), ID.new = ifelse(sample=='mri',ID,ID+max(dataB.mri$ID)) %>% as.factor()) 
+betas2test = list(self = c('total_PE','total_PE.Ctrl','Ctrl'),    other = c('total_PE','total_PE.OCtrl','OCtrl'))
+for (rating in names(betas2test)) {
+  for (beta in betas2test[[rating]]) {
+    print(paste('BAYESIAN LEARNER -',rating, '-', beta))
+    ez::ezANOVA(dat4aov%>%filter(regressor==beta,type==rating),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+  }
+}
+```
+[1] "SUBJECTS - self - total_PE"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn      SSd          F            p p<.05        ges
+1 (Intercept)   1  65 17.30583750 2.684074 419.094083 4.826017e-30     * 0.86572858
+2      sample   1  65  0.06268625 2.684074   1.518068 2.223506e-01       0.02282189
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn      SSd         F         p p<.05
+1   1  65 0.004847841 1.134588 0.2777305 0.5999867      
+
+[1] "SUBJECTS - self - total_PE.Ctrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd       SSn      SSd          F            p p<.05        ges
+1 (Intercept)   1  65 1.7639293 2.693931 42.5606290 1.193112e-08     * 0.39568966
+2      sample   1  65 0.0158588 2.693931  0.3826461 5.383523e-01       0.00585241
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn       SSd         F         p p<.05
+1   1  65 0.003396768 0.9832149 0.2245592 0.6371757      
+
+[1] "SUBJECTS - self - Ctrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn      SSd         F         p p<.05        ges
+1 (Intercept)   1  65 0.01968067 1.450163 0.8821374 0.3510941       0.01338963
+2      sample   1  65 0.03008221 1.450163 1.3483612 0.2498114       0.02032245
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn     SSd         F         p p<.05
+1   1  65 0.001736701 0.62671 0.1801241 0.6726681      
+
+[1] "SUBJECTS - other - total_PE"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn      SSd         F            p p<.05       ges
+1 (Intercept)   1  65 11.3416867 2.376983 310.14504 1.958806e-26     * 0.8267337
+2      sample   1  65  0.0396492 2.376983   1.08423 3.016107e-01       0.0164068
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn       SSd        F         p p<.05
+1   1  65 0.001485561 0.8934011 0.108083 0.7433941      
+
+[1] "SUBJECTS - other - total_PE.OCtrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd          SSn      SSd          F            p p<.05          ges
+1 (Intercept)   1  65 2.8894353198 2.172862 86.4358953 1.489631e-13     * 0.5707754765
+2      sample   1  65 0.0007132303 2.172862  0.0213359 8.843197e-01       0.0003281369
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd        SSn       SSd        F         p p<.05
+1   1  65 0.01475382 0.7349413 1.304864 0.2575171      
+
+[1] "SUBJECTS - other - OCtrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn      SSd          F            p p<.05        ges
+1 (Intercept)   1  65 0.43198507 1.752557 16.0217454 0.0001631735     * 0.19774624
+2      sample   1  65 0.02061631 1.752557  0.7646313 0.3851025418       0.01162679
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn       SSd         F         p p<.05
+1   1  65 0.004113239 0.5632637 0.4746632 0.4933017      
+
+
+
+[1] "BAYESIAN LEARNER - self - total_PE"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn      SSd            F            p p<.05          ges
+1 (Intercept)   1  65 51.67859096 1.524114 2203.9745529 7.163989e-52     * 0.9713526977
+2      sample   1  65  0.00118943 1.524114    0.0507265 8.225105e-01       0.0007797992
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn      SSd         F         p p<.05
+1   1  65 0.001061604 0.512573 0.1346233 0.7148776      
+
+[1] "BAYESIAN LEARNER - self - total_PE.Ctrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn      SSd            F            p p<.05          ges
+1 (Intercept)   1  65 4.411071166 1.903271 1.506457e+02 1.386936e-18     * 0.6985797037
+2      sample   1  65 0.000045443 1.903271 1.551957e-03 9.686963e-01       0.0000238757
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn       SSd         F         p p<.05
+1   1  65 0.007569408 0.7813214 0.6297172 0.4303464      
+
+[1] "BAYESIAN LEARNER - self - Ctrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn       SSd         F            p p<.05         ges
+1 (Intercept)   1  65 0.606668901 0.5683563 69.381614 7.587869e-12     * 0.516302876
+2      sample   1  65 0.001673171 0.5683563  0.191352 6.632437e-01       0.002935237
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd        SSn       SSd        F          p p<.05
+1   1  65 0.01181329 0.1935067 3.968152 0.05057254      
+
+[1] "BAYESIAN LEARNER - other - total_PE"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd          SSn      SSd            F            p p<.05          ges
+1 (Intercept)   1  65 3.121339e+01 1.083369 1.872742e+03 1.212172e-49     * 0.9664557995
+2      sample   1  65 3.743983e-04 1.083369 2.246316e-02 8.813256e-01       0.0003454677
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn      SSd         F        p p<.05
+1   1  65 0.004856604 0.542706 0.5816764 0.448415      
+
+[1] "BAYESIAN LEARNER - other - total_PE.OCtrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn      SSd            F            p p<.05          ges
+1 (Intercept)   1  65 4.967697561 2.132735 151.40198857 1.236888e-18     * 0.6996330744
+2      sample   1  65 0.001630705 2.132735   0.04969948 8.242861e-01       0.0007640232
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd          SSn      SSd          F         p p<.05
+1   1  65 0.0004029317 1.191097 0.02198861 0.8825765      
+
+[1] "BAYESIAN LEARNER - other - OCtrl"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn       SSd         F            p p<.05        ges
+1 (Intercept)   1  65 0.25126814 0.2390128 68.332877 9.822521e-12     * 0.51249833
+2      sample   1  65 0.01055989 0.2390128  2.871784 9.493133e-02       0.04231189
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn        SSd        F          p p<.05
+1   1  65 0.008508592 0.08380198 6.599587 0.01250476     *
+
+
+
+
+# Script 04: Fig 3f, AD affects rating errors
+
+```{r,fig.width=3.5,fig.height=3} 
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='_AT12',full.names = T),load,.GlobalEnv)
+
+## HUMAN DATA
+sum2plot.p13   = rbind(fit_sum_err_AT12.p13.mri[[df2plot]]      %>% rename(AT1=active_1after1,AT2=active_2after1 ) %>% pivot_longer(cols=AT1:AT2 ,values_to=beta2plot,names_to = 'regressor') %>% mutate(sample='mri'),
+                       fit_sum_err_AT12.p13.online[[df2plot]]   %>% rename(AT1=active_1after1,AT2=active_2after1 ) %>% pivot_longer(cols=AT1:AT2 ,values_to=beta2plot,names_to = 'regressor') %>% mutate(sample='online'))
+## BAYESIAN DATA
+sum2plot.p13BL   = rbind(fit_BLsum_err_AT12.p13.mri[[df2plot]]      %>% rename(AT1=active_1after1,AT2=active_2after1 ) %>% pivot_longer(cols=AT1:AT2,values_to=beta2plot,names_to = 'regressor') %>% mutate(sample='mri'),
+                         fit_BLsum_err_AT12.p13.online[[df2plot]]   %>% rename(AT1=active_1after1,AT2=active_2after1 ) %>% pivot_longer(cols=AT1:AT2,values_to=beta2plot,names_to = 'regressor') %>% mutate(sample='online'))
+
+# do ANOVA: group = sample, within = c(rating_time)
+dat4aov    = sum2plot.p13  %>% select(ID,beta_estimate,regressor,sample) %>% mutate(sample = as.factor(sample), regressor=as.factor(regressor),ID.new = ifelse(sample=='mri',ID,ID+max(dataB.mri$ID)) %>% as.factor())
+dat4aov.BL = sum2plot.p13BL %>% select(ID,beta_estimate,regressor,sample) %>% mutate(sample = as.factor(sample), regressor=as.factor(regressor),ID.new = ifelse(sample=='mri',ID,ID+max(dataB.mri$ID)) %>% as.factor())
+
+# PARTICIPANTS
+print('PARTICIPANTS - intercept effect in AT1')
+ez::ezANOVA(dat4aov%>%filter(regressor=='AT1'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>% print()
+print('PARTICIPANTS - intercept effect in AT2')
+ez::ezANOVA(dat4aov%>%filter(regressor=='AT2'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>% print()
+
+# BL
+print('BL - intercept effect in AT1')
+ez::ezANOVA(dat4aov.BL%>%filter(regressor=='AT1'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>% print()
+print('BL - intercept effect in AT2')
+ez::ezANOVA(dat4aov.BL%>%filter(regressor=='AT2'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>% print()
+
+```
+
+ANOVA: across samples (online, mri), -> between factor: sample
+Result: for all, participants and BL, and both AT1 and AT2, we have significant intercept effect i.e. ATs reduce rating errors
+
+[1] "PARTICIPANTS - intercept effect in AT1"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd       SSn      SSd         F           p p<.05        ges
+1 (Intercept)   1  65 0.7265805 6.504996 7.2602243 0.008962144     * 0.10047332
+2      sample   1  65 0.0775557 6.504996 0.7749613 0.381929881       0.01178201
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd       SSn      SSd       F           p p<.05
+1   1  65 0.3490821 2.494935 9.09456 0.003655344     *
+
+[1] "PARTICIPANTS - intercept effect in AT2"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd       SSn      SSd         F            p p<.05        ges
+1 (Intercept)   1  65 1.0058396 5.206354 12.557651 0.0007365981     * 0.16191376
+2      sample   1  65 0.1454781 5.206354  1.816256 0.1824382013       0.02718285
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd       SSn     SSd        F          p p<.05
+1   1  65 0.1722085 2.07561 5.392899 0.02336181     *
+
+[1] "BL - intercept effect in AT1"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn      SSd           F            p p<.05         ges
+1 (Intercept)   1  65 10.18972187 4.355077 152.0827158 1.116144e-18     * 0.700574964
+2      sample   1  65  0.01915661 4.355077   0.2859145 5.946750e-01       0.004379421
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd        SSn      SSd        F         p p<.05
+1   1  65 0.03618561 1.624506 1.447865 0.2332352      
+
+[1] "BL - intercept effect in AT2"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd       SSn      SSd          F            p p<.05        ges
+1 (Intercept)   1  65 9.3323305 4.922145 123.239245 1.185881e-16     * 0.65469475
+2      sample   1  65 0.2016733 4.922145   2.663221 1.075285e-01       0.03935996
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd        SSn      SSd        F         p p<.05
+1   1  65 0.03801943 2.244732 1.100916 0.2979507      
+
+# Script 06: Exploration -> Uncertainty?
+
+```{r}
+lapply(list.files(file.path(path$data,'regression-fits'),pattern='_AT12',full.names = T),load,.GlobalEnv)
+
+# put online and mri sample results together in one data frame
+data2plot.p13 = rbind(fit_avg_unc_AT12_drift.p13.mri[[df2plot]]    %>% pivot_longer(cols=-ID,values_to = beta2plot,names_to = 'regressor') %>% mutate(sample='mri'),
+                      fit_avg_unc_AT12_drift.p13.online[[df2plot]] %>% pivot_longer(cols=-ID,values_to = beta2plot,names_to = 'regressor') %>% mutate(sample='online'))
+
+# stats with ANOVA - avg model; within: phases, group: sample
+dat4aov = rbind(data2plot.p13 %>% select(ID,beta_estimate,regressor,sample)) %>% mutate(sample = as.factor(sample),ID.new = ifelse(sample=='mri',ID,ID+max(dataB.mri$ID)) %>% as.factor())
+
+# test AT1 intercept
+print('1 trial after AD'); ez::ezANOVA(dat4aov%>%filter(regressor=='active_1after1'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+# test AT2 intercept
+print('2 trials after AD'); ez::ezANOVA(dat4aov%>%filter(regressor=='active_2after1'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+# Supplementals
+# trial number
+print('Trial number'); ez::ezANOVA(dat4aov%>%filter(regressor=='phase_trial'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+# phase
+print('Phase'); ez::ezANOVA(dat4aov%>%filter(regressor=='phase'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+# player mu drift
+print('Other changed'); ez::ezANOVA(dat4aov%>%filter(regressor=='player_mu_drift1'),dv = beta_estimate,wid = ID.new,between = sample,detailed=T,type=3) %>%print()
+```
+[1] "1 trial after AD"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn     SSd          F            p p<.05        ges
+1 (Intercept)   1  65 20.8115154 4.48613 301.540162 4.173956e-26     * 0.82266609
+2      sample   1  65  0.1589405 4.48613   2.302904 1.339812e-01       0.03421701
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd        SSn      SSd        F         p p<.05
+1   1  65 0.01180364 2.604086 0.294628 0.5891264      
+
+[1] "2 trials after AD"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn      SSd           F            p p<.05        ges
+1 (Intercept)   1  65 18.3108496 4.217989 282.1736064 2.450550e-25     * 0.81277379
+2      sample   1  65  0.0516111 4.217989   0.7953367 3.757808e-01       0.01208804
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn      SSd         F         p p<.05
+1   1  65 0.007739707 2.450114 0.2053296 0.6519619      
+
+[1] "Trial number"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn       SSd           F            p p<.05       ges
+1 (Intercept)   1  65 57.31836233 0.6408269 5813.884458 2.592710e-65     * 0.9889435
+2      sample   1  65  0.07672952 0.6408269    7.782786 6.913911e-03     * 0.1069317
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn       SSd         F         p p<.05
+1   1  65 0.001701182 0.2380287 0.4645524 0.4979254      
+
+[1] "Phase"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd         SSn       SSd         F         p p<.05        ges
+1 (Intercept)   1  65 0.022835124 0.5602335 2.6494006 0.1084271       0.03916370
+2      sample   1  65 0.007175188 0.5602335 0.8324872 0.3649261       0.01264554
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd          SSn       SSd         F         p p<.05
+1   1  65 0.0003412033 0.2033806 0.1090478 0.7422928      
+
+[1] "Other changed"
+Warning: Data is unbalanced (unequal N per group). Make sure you specified a well-considered value for the type argument to ezANOVA().
+Coefficient covariances computed by hccm()
+$ANOVA
+       Effect DFn DFd        SSn      SSd         F            p p<.05       ges
+1 (Intercept)   1  65 58.3904987 3.375822 1124.2838 9.518082e-43     * 0.9453453
+2      sample   1  65  0.6221795 3.375822   11.9798 9.553998e-04     * 0.1556226
+
+$`Levene's Test for Homogeneity of Variance`
+  DFn DFd         SSn     SSd         F         p p<.05
+1   1  65 0.004625794 1.25122 0.2403069 0.6256352      
