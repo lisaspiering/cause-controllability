@@ -3,3 +3,5 @@ mri-data/.DS_Store
 analysis/behaviour/.Rhistory
 analysis/_functions/.Rhistory
 README.html
+*.html
+analysis/behaviour/cc_beh03_credit_assignment_social_PEs.nb.html

@@ -1,7 +1,8 @@
 # Script to fit the 3 different Bayesian learning models
 # 1) Active learner
 # 2) Passive learner
-# 3) Ignorant loearner
+# 3) Ignorant learner
+# Lisa Spiering, 2025
 
 rm(list=ls()) 
 library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(foreach);library(doParallel);library(sjPlot);library(cmdstanr)

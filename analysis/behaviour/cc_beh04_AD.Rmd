@@ -4,6 +4,7 @@ output: html_notebook
 ---
 
 Here, we investigate the dynamics around AD using regressions.
+Lisa Spiering, 2025
 
 ```{r,include=F}
 rm(list=ls()) 

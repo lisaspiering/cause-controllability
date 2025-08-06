@@ -5,6 +5,7 @@ output: html_notebook
 
 Do people assign social PEs to themselves and others in the Self-Other phase? (figure 2e)
 -> People split up PE to self other by weighing it with control
+Lisa Spiering, 2025
 
 ```{r Setup,include=F}
 rm(list=ls()) 

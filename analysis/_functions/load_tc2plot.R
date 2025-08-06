@@ -1,5 +1,6 @@
 load_tc2plot <- function(regnames,roi2plot,allBeta) {
   # convenience plotting variables
+  # Lisa Spiering, 2025
   time = seq(from=-2,to=15, length.out=250) # 250 samples, -2 to 15 is our plotted time epoch
   
   betas2plot = list()

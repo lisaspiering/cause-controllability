@@ -4,6 +4,7 @@ output: html_notebook
 ---
 
 In this script, I examine whether people infer their control from AD and normal trials. I do this through a series of regression models. I then compare their regression results to that of the active learner, passive learner, and ignorant learner.
+Lisa Spiering, 2025
 
 ```{r,include=F}
 rm(list=ls()) 

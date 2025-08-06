@@ -4,6 +4,7 @@ output: html_notebook
 ---
 
 Here, we prepare the behavioural data for the running the ROI-GLMs.
+Lisa Spiering, 2025
 
 ```{r,include=F}
 rm(list=ls()) 

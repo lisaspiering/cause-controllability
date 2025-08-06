@@ -3,6 +3,7 @@ transform_data_l1 <- function(dataB.mri,path,subs2filter) {
   # we mainly select the columns of dataB.mri that we're interested in, filter out Self-Only trials (phase 2), and then recompute some onsets, durations, and RTs
   # input: dataB.mri
   # output: dataB.mri
+  # Lisa Spiering, 2025
   dataB.mri = out$dataB.mri %>% filter(phase!=2) %>%
     select(ID,game_number,phase,game_trial,phase_trial,gameS,gameB,gameR,gameL,starts_with('rate_'),starts_with('active_'),self_feedback,feedback,feedback_prev,starts_with('total_PE'),player_mu,self_mu,control_level,player_mu_drift,starts_with('timing_'),starts_with('onset'),starts_with('offset'),
            contains('BL_avg_unc'),contains('BL_max_unc'), contains('BL_self_unc'),contains('BL_other_unc'),contains('BL_ctrl_unc'),-contains('curprev'),-contains('AbsN2'),perferror_abs) %>%

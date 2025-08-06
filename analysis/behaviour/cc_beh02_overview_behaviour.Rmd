@@ -4,6 +4,7 @@ output: html_notebook
 ---
 
 In this script, we want to get a general overview of participants' behaviour. For this, we create various plots.
+Lisa Spiering, 2025
 
 ```{r, include=F}
 rm(list=ls()) 

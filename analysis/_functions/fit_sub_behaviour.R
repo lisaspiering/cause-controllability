@@ -5,6 +5,7 @@ fit_sub_behaviour = function(fit.data=fit.data,fit.vars=fit.vars,fit.model=fit.m
   #         path - path where the subject folders are saved (i.e. it wants path$save variable)
   #         fit.name - file name name under which each subject's regressor estimates should be saved
   # outputs: pars - parameter estimate for the person that was fitted => this is saved in a file (i.e. not an output variable of calling the function directly)
+  # Lisa Spiering, 2025
   
   data.sample = ifelse(grepl('.online',fit.name), 'online', 'mri') # find out which data sample we're analysing so that we can save the brms output in the right subfolder 
   subfolder   = paste0('indivs_',data.sample) 
