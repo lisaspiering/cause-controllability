@@ -1,0 +1,311 @@
+---
+title: "Reformat behavioural data for ROI-GLMs"
+output: html_notebook
+---
+
+Here, we prepare the behavioural data for the running the ROI-GLMs.
+
+```{r,include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(stringi);library(jsonlite);library(magrittr);library(corrplot); 
+
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors
+
+# load MRI data
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online; dataS = out$dataS
+dataB.mri.4roi = transform_data_l1(dataB.mri,path,subs2filter)
+```
+
+We want to reformat the data to this format: One row per button press / one row per timing -> we convert dataB into a long format where we have one row per decision, per action, per outcome 'Do_p1','Do_p3','Ds_p3','A_p13','O_p1','O_p3'
+
+
+# GLM group 001: ROI-GLMs 1 and 2
+
+ROI-GLM1: BOLD ~ control + control update
+- all trials in Control-Other phase included
+ROI-GLM2: BOLD ~ feedback diff(AD to normal) + feedback diff(normal to AD) + inverseself + AD
+- only switch trials from AD to normal or vice-versa in Control-Other phase included
+
+```{r}
+glmix = '001'
+
+dataB4roi = dataB.mri.4roi %>% 
+  # rename some variables
+  rename(AT    = active_trial,  fb     = feedback,         trial = game_trial,   
+         self  = rate_self,     selfU  = rate_self_updN,
+         other = rate_other,    otherU = rate_other_updN,
+         unc   = BL_avg_unc,    uncU   = BL_avg_unc_updN) %>% 
+  mutate(mustscale  = 0,
+         # compute timings
+         onset_A1   = ifelse(phase==1,onset_A13,NA),     onset_A3   = ifelse(phase==3,onset_A13,NA), onset_A13i = onset_A13, onset_A13ii = onset_A13, onset_A3i = onset_A3,
+         onset_O1   = ifelse(phase==1,onset_O13,NA),     onset_O3   = ifelse(phase==3,onset_O13,NA),
+         onset_O3i = onset_O3, onset_O3ii = onset_O3, onset_O3iii = onset_O3, onset_O3iv = onset_O3,onset_O3v = onset_O3,# copy some events so that we can compare multiple GLMs for the same event
+         onset_O1i = onset_O1, onset_O1ii = onset_O1, onset_O1iii = onset_O1,
+         onset_O13i = onset_O13, onset_O13ii = onset_O13, onset_O13iii = onset_O13,
+         RT_A3 = ifelse(phase==3,RT_A13,NA),
+         fb_p13 = fb, fb_p1 = ifelse(phase==1,fb,NA), fb_p3 = ifelse(phase==3,fb,NA) # feedback
+  ) %>% 
+  group_by(ID,game_number,phase) %>% mutate(
+    AT_p3       = ifelse(phase==3,AT,NA), # variable copy that's normalised only within p3
+    AT_p1       = ifelse(phase==1,AT,NA),
+    AT_p13      = AT,
+    
+    # ----- ROI-GLM 1 -----
+    # helper variables
+    fbU         = fb - feedback_prev,
+    ATS_ori     = c(NA,diff(AT)), # switch variable (pos if switch from AT to normal, neg if vice versa)
+    ATS         = ifelse(phase_trial==12 & player_mu_drift==1, 0, ATS_ori),# set switch variable to 0 on first player_mu_drift trial bc here sth weird can happen with the fbU variable
+    swN2E       = ifelse(ATS==1,-1,0), 
+    swE2N       = ifelse(ATS==-1,1,0), # leave sign at -1 so that swE2N * fbU brings out positive effects (bc both are then negative)
+    # feedback difference and inverse self on switch trials
+    fbU_N2E     = ifelse(phase==3 & swN2E!=0,swN2E * fbU,NA), # feedback update on normal to AD switch
+    fbU_E2N     = ifelse(phase==3 & swE2N!=0,swE2N * fbU,NA), # feedback update on AD to normal switch
+    fbU_sw      = ifelse(phase==3 & swN2E!=0,fbU_N2E,fbU_E2N), # feedback diff on all switch trials
+    invself_N2E = ifelse(phase==3 & swN2E!=0,log(1 / self),NA), # inverse self on normal to AD switch
+    invself_E2N = ifelse(phase==3 & swE2N!=0,log(1 / self),NA), # inverse self on AD to normal switch
+    invself_sw  = ifelse(phase==3 & swN2E!=0, invself_N2E, invself_E2N), # inverse self on all switch trials
+    # handle inf values for inverse parameters - replace them by NA
+    across(c(invself_N2E,invself_E2N,invself_sw), ~ ifelse(is.infinite(.),NA,.x)),
+    # AD as control regressor that is coded only on switch trials
+    AT_sw_O13   = abs(ATS),                     
+    AT_sw_O3    = ifelse(phase==3,AT_sw_O13,NA),
+    AT_p3_onswonly = ifelse(AT_sw_O3==1,AT_p3,NA), # control regressor for active trial that's only z-scored on switch trials
+    # new onset variables just across for switch trials, 
+    onset_O3_sw = ifelse(AT_sw_O3==1,onset_O3,NA),
+    
+    # ----- ROI-GLM 2 -----
+    # control on switch trials
+    ctrlN_p3_all   = ifelse(phase==3,    rate_ctrl_next,NA),
+    # ctrl update
+    ctrlU_p3_all   = ifelse(phase==3,rate_ctrl_updN,NA)
+  ) %>% ungroup()
+
+
+# normalise data
+vars2scale    = list(
+  byphase     = c('invself_sw','fbU_N2E','fbU_E2N','ctrlN_p3_all','AT_p3_onswonly'),
+  acrossphase = c()
+)
+dataB4roiZ = dataB4roi %>% 
+  # scale variables within ID + phase
+  group_by(ID,phase) %>% 
+  mutate(across(all_of(vars2scale$byphase),scale)) %>% ungroup() %>% 
+  # scale more variables within ID only - i.e. across phases
+  group_by(ID) %>% 
+  mutate(across(all_of(vars2scale$acrossphase), scale)) %>% ungroup() %>%
+  # after scaling, we set some variables to 0 for special trials so that they are ignored for GLM
+  #  e.g. PE_other set to 0 on active trials
+  #  e.g. if they have NaNs (this happens if e.g. there are only 2 ATs within p1 across whole experikment and the p1 is in same game => then AT_ctrl is e.g. 0.5 for those 2 trials and we get NaNs when z-scoring them)
+  mutate(across(-c(starts_with('offset_'),starts_with('dur_'),starts_with('RT_'),starts_with('onset_')), ~ ifelse(is.nan(.) | is.na(.),0,.x)))
+
+# transform data for saving
+events2select = c('onset_O3','onset_O3_sw')
+dataB4roiZ2 = dataB4roiZ %>% pivot_longer(cols=all_of(events2select), names_to='event',values_to='onset') %>% filter(!is.na(onset)) %>% # make df longer so that one row per event of interest
+  mutate( eoi = event) %>% select(-starts_with('timing_'), -event) %>% filter(!is.na(eoi))
+# save
+what2save = list(dataB = dataB4roiZ2 %>% as.data.frame.array() %>% select(-eoi) %>% as.data.frame(), namesB = names(dataB4roiZ2%>%select(-eoi)), eois = dataB4roiZ2$eoi %>% unlist())
+rmatio::write.mat(what2save,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'.mat')))
+save(dataB4roiZ,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'_forplots.RData')))
+```
+
+# GLM group 002: ROI-GLMs 3 - 6
+sPE, oPE, tPE and control on non-AD trials in the Self-Other phase
+
+```{r}
+glmix = '002'
+
+dataB4roi = dataB.mri.4roi %>% 
+  # rename some variables
+  rename(AT    = active_trial,  fb     = feedback,         trial = game_trial,   
+         self  = rate_self,     selfU  = rate_self_updN,
+         other = rate_other,    otherU = rate_other_updN,
+         unc   = BL_avg_unc,    uncU   = BL_avg_unc_updN) %>% 
+  group_by(ID,game_number,phase) %>%
+  mutate(mustscale  = 0,
+         # compute timings for events of interest
+         onset_O1   = ifelse(phase==1,onset_O13,NA), onset_O1i = onset_O1, onset_O1ii = onset_O1, onset_O1iii = onset_O1, onset_O1iv = onset_O1, onset_O1v = onset_O1,
+         onset_O1vi = onset_O1, onset_O1vii = onset_O1, onset_O1viii = onset_O1,
+         onset_O1_PT   = ifelse(phase==1 & AT==0, onset_O1, NA), onset_O1_PTi = onset_O1_PT,onset_O1_PTii = onset_O1_PT,onset_O1_PTiii = onset_O1_PT,onset_O1_PTiv = onset_O1_PT,
+         # total PE
+         PE_p1_PT   = ifelse(phase==1&AT==0,total_PE_signed,NA), # tPE in manuscript, only on non-AD trials
+         # control
+         ctrl_p1_PT   = ifelse(phase==1&AT==0,control_level,NA), # control in manuscript
+         # PE_self + PE_other in p1 on passive trials
+         PE_self     = ifelse(AT==0 & phase==1,total_PE_signed * control_level,NA), # sPE in manuscript
+         PE_other    = ifelse(AT==0 & phase==1,total_PE_signed * (1-control_level),NA) # oPE in manuscript
+  )
+
+# normalise data
+vars2scale    = list(
+  byphase     = c('PE_p1_PT','PE_other','PE_self','ctrl_p1_PT'),
+  acrossphase = c()
+)
+
+# normalise the data & make interaction effects
+dataB4roiZ = dataB4roi %>% 
+  # scale variables within ID + phase
+  group_by(ID,phase) %>% 
+  mutate(across(all_of(vars2scale$byphase),scale)) %>% ungroup() %>% 
+  # scale more variables within ID only - i.e. across phases
+  group_by(ID) %>% 
+  mutate(across(all_of(vars2scale$acrossphase), scale)) %>% 
+  # after scaling, we set some variables to 0 for special trials so that they are ignored for GLM
+  #  e.g. PE_other set to 0 on active trials
+  #  e.g. if they have NaNs (this happens if e.g. there are only 2 ATs within p1 across whole experiment and the p1 is in same game => then AT_ctrl is e.g. 0.5 for those 2 trials and we get NaNs when z-scoring them)
+  mutate(across(-c(starts_with('offset_'),starts_with('dur_'),starts_with('RT_'),starts_with('onset_')), ~ ifelse(is.nan(.) | is.na(.),0,.x)))
+
+# transform data for saving
+events2select = c('onset_O1_PT','onset_O1_PTi','onset_O1_PTii','onset_O1_PTiii')
+dataB4roiZ2 = dataB4roiZ %>% pivot_longer(cols=all_of(events2select), names_to='event',values_to='onset') %>% filter(!is.na(onset)) %>% # make df longer so that one row per event of interest
+  mutate( eoi = event) %>% select(-starts_with('timing_'), -event) %>% filter(!is.na(eoi))
+# save
+what2save = list(dataB = dataB4roiZ2 %>% as.data.frame.array() %>% select(-eoi) %>% as.data.frame(), namesB = names(dataB4roiZ2%>%select(-eoi)), eois = dataB4roiZ2$eoi %>% unlist())
+rmatio::write.mat(what2save,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'.mat')))
+save(dataB4roiZ,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'_forplots.RData')))
+```
+
+# GLM group 003: ROI-GLM 7
+
+feedback signals in nucleus accumbens
+
+```{r}
+glmix = '003'
+
+dataB4roi = dataB.mri.4roi %>% 
+  # rename some variables
+  rename(AT    = active_trial,  fb     = feedback,         trial = game_trial,   
+         self  = rate_self,     selfU  = rate_self_updN,
+         other = rate_other,    otherU = rate_other_updN,
+         unc   = BL_avg_unc,    uncU   = BL_avg_unc_updN) %>% 
+  mutate(mustscale  = 0,
+         # compute timings for events of interest
+         onset_A1   = ifelse(phase==1,onset_A13,NA),     onset_A3   = ifelse(phase==3,onset_A13,NA), onset_A13i = onset_A13, onset_A13ii = onset_A13, onset_A3i = onset_A3,
+         onset_O1   = ifelse(phase==1,onset_O13,NA),     onset_O3   = ifelse(phase==3,onset_O13,NA),
+         onset_O3i = onset_O3, onset_O3ii = onset_O3, onset_O3iii = onset_O3, onset_O3iv = onset_O3,onset_O3v = onset_O3,# copy some events so that we can compare multiple GLMs for the same event
+         onset_O1i = onset_O1, onset_O1ii = onset_O1, onset_O1iii = onset_O1,
+         onset_O13i = onset_O13, onset_O13ii = onset_O13, onset_O13iii = onset_O13,
+         # feedback
+         fb_p13 = fb, fb_p1 = ifelse(phase==1,fb,NA), fb_p3 = ifelse(phase==3,fb,NA),
+         fb_PT = ifelse(AT==0,fb,NA)
+  ) %>% 
+  group_by(ID,game_number,phase) %>% mutate(
+    AT_p3       = ifelse(phase==3,AT,NA), # variable copy that's normalised only within p3
+    AT_p1       = ifelse(phase==1,AT,NA),
+    AT_p13      = AT,
+    # helper variables
+    fbU         = fb - feedback_prev,
+    ATS_ori     = c(NA,diff(AT)), # switch variable (pos if switch from AT to normal, neg if vice versa)
+    ATS         = ifelse(phase_trial==12 & player_mu_drift==1, 0, ATS_ori),# set switch variable to 0 on first player_mu_drift trial bc here sth weird can happen with the fbU variable
+    isPTstay =  ATS_ori==0 & AT==0 & phase_trial!=12, # index variable for whether people stay i.e. don't switch between normal and AD
+    
+    # regressors of interest
+    fb_PTstay = ifelse(phase!=2 & isPTstay, fb,NA), # feedback on normal trials where the previous trial was also a normal trial
+    fbU_p13_PTstay = ifelse(phase!=2 & isPTstay, fbU,NA), # feedback change on normal trials where the previous trial was also a normal trial
+    
+    # new onset variable just for normal trials where the previous trial was also a normal trial
+    onset_O13_PTstay = ifelse(isPTstay,onset_O13,NA)
+  ) %>% ungroup()
+
+# normalise data
+vars2scale    = list(
+  byphase     = c(),
+  acrossphase = c('fbU_p13_PTstay','fb_PTstay')
+)
+
+dataB4roiZ = dataB4roi %>% 
+  # scale variables within ID + phase
+  group_by(ID,phase) %>% 
+  mutate(across(all_of(vars2scale$byphase),scale)) %>% ungroup() %>% 
+  # scale more variables within ID only - i.e. across phases
+  group_by(ID) %>% 
+  mutate(across(all_of(vars2scale$acrossphase), scale)) %>% ungroup() %>%
+  
+  # after scaling, we set some variables to 0 for special trials so that they are ignored for GLM
+  #  e.g. PE_other set to 0 on active trials
+  #  e.g. if they have NaNs (this happens if e.g. there are only 2 ATs within p1 across whole experikment and the p1 is in same game => then AT_ctrl is e.g. 0.5 for those 2 trials and we get NaNs when z-scoring them)
+  mutate(across(-c(starts_with('offset_'),starts_with('dur_'),starts_with('RT_'),starts_with('onset_')), ~ ifelse(is.nan(.) | is.na(.),0,.x)))
+
+# transform data for saving
+events2select = c('onset_O13_PTstay')
+dataB4roiZ2 = dataB4roiZ %>% pivot_longer(cols=all_of(events2select), names_to='event',values_to='onset') %>% filter(!is.na(onset)) %>% # make df longer so that one row per event of interest
+  mutate( eoi = event) %>% select(-starts_with('timing_'), -event) %>% filter(!is.na(eoi))
+# save
+what2save = list(dataB = dataB4roiZ2 %>% as.data.frame.array() %>% select(-eoi) %>% as.data.frame(), namesB = names(dataB4roiZ2%>%select(-eoi)), eois = dataB4roiZ2$eoi %>% unlist())
+rmatio::write.mat(what2save,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'.mat')))
+save(dataB4roiZ,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'_forplots.RData')))
+```
+
+
+
+# GLM group 004: ROI-GLMs 8-11 (supplementals)
+time-locked to action
+uncertainty signals
+
+```{r}
+glmix = '004'
+
+dataB4roi = dataB.mri.4roi %>% 
+  # rename some variables
+  rename(AT    = active_trial,  fb     = feedback,         trial = game_trial,   
+         self  = rate_self,     selfU  = rate_self_updN,
+         other = rate_other,    otherU = rate_other_updN,
+         unc   = BL_avg_unc,    uncU   = BL_avg_unc_updN) %>% 
+  mutate(mustscale  = 0,
+         # compute timings for events of interest
+         onset_A1   = ifelse(phase==1,onset_A13,NA),     onset_A3   = ifelse(phase==3,onset_A13,NA), onset_A13i = onset_A13, onset_A13ii = onset_A13, onset_A3i = onset_A3,onset_A1i = onset_A1,onset_A3ii = onset_A3,onset_A3iii = onset_A3,
+         onset_O1   = ifelse(phase==1,onset_O13,NA),     onset_O3   = ifelse(phase==3,onset_O13,NA),
+         onset_O3i = onset_O3, onset_O3ii = onset_O3, onset_O3iii = onset_O3, onset_O3iv = onset_O3,onset_O3v = onset_O3,# copy some events so that we can compare multiple GLMs for the same event
+         onset_O1i = onset_O1, onset_O1ii = onset_O1, onset_O1iii = onset_O1,
+         onset_O13i = onset_O13, onset_O13ii = onset_O13, onset_O13iii = onset_O13
+  ) %>% 
+  group_by(ID,game_number,phase) %>% mutate(
+    AT_p1        = ifelse(phase==1,AT,NA),
+    AT_p3        = ifelse(phase==3,AT,NA), 
+    AT_p13       = AT,
+    unc_self_p1  = ifelse(phase==1,BL_self_unc,NA),
+    unc_other_p1 = ifelse(phase==1,BL_other_unc,NA),
+    unc_other_p3 = ifelse(phase==3,BL_other_unc,NA),
+    unc_ctrl_p3  = ifelse(phase==3,BL_ctrl_unc,NA),
+    unc_avg_p13  = unc,
+    # regressors of no interest to control for our regressors of interest (similar to whole-brain design)
+    switch_p13   = abs(diff(c(NA,AT))), switch_p1 = ifelse(phase==1,switch_p13,NA), switch_p3 = ifelse(phase==3,switch_p13,NA),
+    RT_A3        = ifelse(phase==3,RT_A13,NA), RT_A1  = ifelse(phase==1,RT_A13,NA),
+    gameR_p1     = ifelse(phase==1,gameR,NA), gameR_p3 = ifelse(phase==3,gameR,NA), # dummy variables per phase coding for whether it's a different game to the bouncing ball
+    gameL_p1     = ifelse(phase==1,gameL,NA), gameL_p3 = ifelse(phase==3,gameL,NA),
+    gameS_p1     = ifelse(phase==1,gameS,NA), gameS_p3 = ifelse(phase==3,gameS,NA)
+  ) %>% ungroup()
+
+# normalise data
+vars2scale    = list(
+  byphase     = c('AT_p1','AT_p3','unc_self_p1','unc_other_p1','unc_other_p3','unc_ctrl_p3','phase_trial','switch_p1','switch_p3','gameR_p1','gameR_p3','gameL_p1','gameL_p3','gameS_p1','gameS_p3','RT_A3','RT_A1'),
+  acrossphase = c('AT_p13','unc_avg_p13','trial','switch_p13','gameS','gameL','gameR','RT_A13')
+)
+
+dataB4roiZ = dataB4roi %>% 
+  # scale variables within ID + phase
+  group_by(ID,phase) %>% 
+  mutate(across(all_of(vars2scale$byphase),scale)) %>% ungroup() %>% 
+  # scale more variables within ID only - i.e. across phases
+  group_by(ID) %>% 
+  mutate(across(all_of(vars2scale$acrossphase), scale)) %>% ungroup() %>%
+  
+  # after scaling, we set some variables to 0 for special trials so that they are ignored for GLM
+  #  e.g. PE_other set to 0 on active trials
+  #  e.g. if they have NaNs (this happens if e.g. there are only 2 ATs within p1 across whole experikment and the p1 is in same game => then AT_ctrl is e.g. 0.5 for those 2 trials and we get NaNs when z-scoring them)
+  mutate(across(-c(starts_with('offset_'),starts_with('dur_'),starts_with('RT_'),starts_with('onset_')), ~ ifelse(is.nan(.) | is.na(.),0,.x)))
+
+# transform data for saving
+events2select = c('onset_A1','onset_A1i','onset_A3','onset_A3i','onset_A3ii','onset_A3iii','onset_A13')
+dataB4roiZ2 = dataB4roiZ %>% pivot_longer(cols=all_of(events2select), names_to='event',values_to='onset') %>% filter(!is.na(onset)) %>% # make df longer so that one row per event of interest
+  mutate( eoi = event) %>% select(-starts_with('timing_'), -event) %>% filter(!is.na(eoi))
+# save
+what2save = list(dataB = dataB4roiZ2 %>% as.data.frame.array() %>% select(-eoi) %>% as.data.frame(), namesB = names(dataB4roiZ2%>%select(-eoi)), eois = dataB4roiZ2$eoi %>% unlist())
+rmatio::write.mat(what2save,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'.mat')))
+save(dataB4roiZ,file=file.path(path$gitlab,'mri-data','roi-time-courses',paste0('roi01_behdata_glm',glmix,'_forplots.RData')))
+```
