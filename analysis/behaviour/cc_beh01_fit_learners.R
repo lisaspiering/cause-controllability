@@ -25,11 +25,11 @@ setwd(path$script) # set working directory to script folder so that stan finds s
 
 # load data
 # 1) load MRI behaviour
-load(file = file.path(path$data,'preprocessed_behaviour_mri.RData'))
+load(file = file.path(path$data,'preprocessed_behaviour_mri.RData'),verbose=T)
 dataB.mri = dataB.mri %>% filter(ID %in% subs2filter$mri.incl) 
 
 # 2) load online data
-load(file.path(path$data,'preprocessed_behaviour_online.RData'))
+load(file.path(path$data,'preprocessed_behaviour_online.RData'),verbose=T)
 dataB.online = dataB.online %>% filter(!(ID %in% subs2filter$online.excl))
 
 # for our regressions, I will look at both online and MRI participants at once -> for this, combine both datasets in one and therefore create a new ID column
