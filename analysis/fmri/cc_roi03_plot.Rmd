@@ -1,0 +1,493 @@
+---
+title: "Plot the time course results for manuscript"
+output: html_notebook
+---
+
+Here, we plot the time course results for the manuscript. 
+
+```{r,include=F}
+rm(list=ls()) 
+library(tidyverse);library(dplyr);library(ggplot2);library(ggpubr);library(rstan);library(brms);library(shinystan);library(rmcorr);library(zoo);library(stringi);library(jsonlite);library(magrittr);library(corrplot); 
+
+# source all subfunctions in the functions subfolder
+sapply(list.files(path=file.path('/Users',Sys.info()['user'],'Documents/GitHub/cause-controllability/analysis/_functions'), pattern='.R', full.names = T),source) 
+
+# setup data analysis
+out  = setup_cc()
+path = out$path; subs2filter = out$subs2filter; df2plot = out$df2plot; beta2plot = out$beta2plot; my.priors = out$my.priors; cols=out$cols
+
+# load MRI data
+out       = load_data4regs(path,subs2filter) 
+dataB.mri = out$dataB.mri; dataB.online = out$dataB.online; dataQ.mri = out$dataQ.mri; dataQ.online = out$dataQ.online; dataS = out$dataS; 
+dataB.mri.4roi = transform_data_l1(dataB.mri,path,subs2filter)
+```
+
+
+# Supplementary Figure 13: correlation matrices for ROI-GLMs
+
+```{r}
+# load data 
+load(file=file.path(path$gitlab,'mri-data/roi-time-courses','roi01_behdata_glm001_forplots.RData')); dat4roi_glm001 = dataB4roiZ
+load(file=file.path(path$gitlab,'mri-data/roi-time-courses','roi01_behdata_glm002_forplots.RData')); dat4roi_glm002 = dataB4roiZ
+load(file=file.path(path$gitlab,'mri-data/roi-time-courses','roi01_behdata_glm003_forplots.RData')); dat4roi_glm003 = dataB4roiZ
+load(file=file.path(path$gitlab,'mri-data/roi-time-courses','roi01_behdata_glm004_forplots.RData')); dat4roi_glm004 = dataB4roiZ
+
+# plot 
+panelA = dat4roi_glm001 %>% filter(phase==3) %>% select(AT_p3_onswonly,fbU_E2N, fbU_N2E,invself_sw,ctrlU_p3_all, ctrlN_p3_all) %>% 
+  rename(AD = AT_p3_onswonly, `Feedback difference\n(AD to normal trial)` = fbU_E2N, `Feedback difference\n(normal to AD trial)` = fbU_N2E,
+         `Inverse self` = invself_sw, `Control update` = ctrlU_p3_all, `Control` = ctrlN_p3_all) %>%
+  cor() %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F)
+panelBC = ggarrange(nrow=2,
+                    dat4roi_glm002 %>% filter(phase==1) %>% select(ctrl_p1_PT,PE_p1_PT,PE_other,PE_self) %>% rename(oPE = PE_other, sPE = PE_self, tPE = PE_p1_PT, Control = ctrl_p1_PT) %>%
+                      cor() %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F),
+                    dat4roi_glm003 %>% select(fbU_p13_PTstay,fb_PTstay) %>% rename(Feedback = fb_PTstay, `Feedback change` = fbU_p13_PTstay) %>%
+                      cor() %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F))
+
+# plot 
+panelD= dat4roi_glm004 %>% select('gameR','gameS','gameL','RT_A13','switch_p13','trial','unc_avg_p13','AT_p13') %>% 
+  rename(`Uncertainty` = unc_avg_p13, Trial = trial, `Switch trial` = switch_p13,RT = RT_A13, AD = AT_p13,`Game type 1` = gameL, `Game type 2` = gameS, `Game type 3` = gameR) %>%
+  cor() %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F)
+panelE = dat4roi_glm004 %>% filter(phase==3) %>% select('gameR_p3', 'gameS_p3','gameL_p3','RT_A3','switch_p3','phase_trial','AT_p3','unc_other_p3','unc_ctrl_p3','unc_avg_p13') %>% 
+  rename(`Control uncertainty` = unc_ctrl_p3, `Other uncertainty` = unc_other_p3, Trial = phase_trial,`Switch trial` = switch_p3,RT = RT_A3, AD = AT_p3, `Uncertainty` = unc_avg_p13,
+         `Game type 1` = gameL_p3, `Game type 2` = gameS_p3, `Game type 3` = gameR_p3) %>%
+  cor() %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F,lab_size=3.5)
+panelF = dat4roi_glm004 %>% filter(phase==1) %>% select('gameR_p1', 'gameS_p1','gameL_p1','RT_A1','switch_p1','phase_trial','AT_p1','unc_other_p1','unc_self_p1','unc_avg_p13') %>% 
+  rename(`Self uncertainty` = unc_self_p1, `Other uncertainty` = unc_other_p1, Trial = phase_trial, `Switch trial` = switch_p1,RT = RT_A1, AD = AT_p1, `Uncertainty` = unc_avg_p13,
+         `Game type 1` = gameL_p1, `Game type 2` = gameS_p1, `Game type 3` = gameR_p1) %>%
+  cor() %>% ggcorrplot::ggcorrplot(lab=T,show.legend=F,lab_size=3.5)
+
+ggarrange(nrow=2,heights=c(0.5,1),
+          ggarrange('',panelA,'',panelBC,ncol=4,widths=c(0.5,2,0.5,1),align='h'),
+          ggarrange('',panelD,'',panelE,'',panelF,ncol=4,nrow=2,widths=c(0.2,1,0.2,1))
+)
+# save
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_cormat_raw.jpg'),width = 30,height=36,units = 'cm') 
+```
+
+# GLM group 001 
+
+## Figure 6 - SMG
+Put data together for timecourse plots
+```{r}
+roi2plot = 'SMG_left_centr_765154'
+
+# betas from the timecourse script
+allBeta = rmatio::read.mat(file.path(path$gitlab,'mri-data','roi-time-courses','roi02b_tc_glm001_allBeta.mat'))$allBeta
+# reg names just copied from matlab
+regnames = list(
+  onset_O3_sw   = c('fbU_E2N','fbU_N2E','invself_sw','AT_p3_onswonly','constant'),
+  onset_O3       = c('ctrlU_p3_all','ctrlN_p3_all', 'constant')
+)
+
+# put betas of all events of interest in one big variable
+betas2plot = load_tc2plot(regnames,roi2plot,allBeta) 
+
+# Put data together for bar plots
+eoi4bar  = 'onset_O3_sw' # take GLM with invself included as well
+file4bar = file.path(path$gitlab,'mri-data','roi-time-courses/') %>% paste0('roi02c_stats_glm001_',eoi4bar,'_4to10_subpeaks.xlsx')
+glm_onset_O3 = rbind(readxl::read_xlsx(file4bar,sheet=1,.name_repair = 'minimal'),readxl::read_xlsx(file4bar,sheet=2,.name_repair = 'minimal')) %>%
+  subset(., select = which(!duplicated(names(.)))) %>% select(all_of(roi2plot),ID,REG)
+glm_onset_O3_transformed = glm_onset_O3 %>% pivot_wider(id_cols='ID',names_from = 'REG',values_from=all_of(roi2plot)) %>%
+  mutate(curVSprevFB = (fbU_E2N - fbU_N2E)/2,  norVSexplFB = (fbU_E2N + fbU_N2E)/2) %>%
+  pivot_longer(cols=c('curVSprevFB','norVSexplFB'),names_to='regressor',values_to='beta_estimate') 
+```
+
+### Panel B: control and control update
+Control update and next trial's control rating during all trials
+
+Plot timecourses
+```{r,fig.width=11,fig.height=3}
+plot_tcs = function(what2plot,cls,lbl) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25,show.legend=F) + geom_line(aes(y=beta_mu,color=var,linetype=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill'),labels=lbl) + scale_linetype(labels=lbl) + ylab('SMG beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=13),legend.title = element_blank(),legend.direction = 'vertical',legend.background = element_blank(),legend.key.size = unit(0.5, "cm")) 
+}
+
+## Panel B: ctrl update and control on all trials
+cols_ctrlN = c('ctrlN_p3_all' = cols$Control); lgd_ctrlN  = c('ctrlN_p3_all'='Control')
+cols_ctrlU = c('ctrlU_p3_all' = cols$Control); lgd_ctrlU=c('ctrlU_p3_all'= 'Control update')
+panelBi  = betas2plot$onset_O3 %>% filter(var%in%c('ctrlN_p3_all')) %>% plot_tcs(.,cols_ctrlN,lgd_ctrlN) + theme(legend.position='none')
+panelBii = betas2plot$onset_O3 %>% filter(var%in%c('ctrlU_p3_all')) %>% plot_tcs(.,cols_ctrlU,lgd_ctrlU) + scale_linetype_manual(values = 17,labels=lgd_ctrlU) + theme(legend.position='none')
+
+# plot together
+ggarrange(panelBi,panelBii,nrow=1,ncol=2)
+#ggsave(file.path(path$figs,'Fig06','Fig06B.jpg'),width = 19,height=8,units = 'cm')
+#ggsave(file.path(path$figs,'Fig06','Fig06B.svg'),width = 19,height=8,units = 'cm')
+```
+
+
+### Panels E: feedback difference
+
+Plot timecourses and bar plots together
+```{r,fig.width=8,fig.height=3}
+# functions for plotting
+plot_tcs = function(what2plot,cls,lbl) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25,show.legend = F) + geom_line(aes(y=beta_mu,color=var,linetype=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill'),labels=lbl) + scale_linetype(labels=lbl) + ylab('SMG beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=13),legend.title = element_blank(),legend.direction = 'vertical',legend.background = element_blank(),legend.key.size = unit(0.5, "cm")) 
+}
+plot_bars = function(what2plot,lbls) {
+  what2plot %>% ggbarplot(.,'regressor','beta_estimate',add=c('mean_se','jitter'),position = position_dodge(0.75),add.params=list(size='regressor',alpha=0.1,show.legend=F),fill=cols$ADL) + 
+    geom_hline(yintercept = 0) + scale_x_discrete(limits=c('norVSexplFB','curVSprevFB'),labels=lbls_bars) + scale_size_manual(values=c(1,1)) + ylab('SMG beta weights') + xlab(element_blank()) + 
+    theme_pubr(base_size = 14) + theme(panel.background = element_rect(fill='transparent'),plot.background = element_rect(fill='transparent', color=NA))
+}
+
+# Plot
+cols_tc   = c('fbU_E2N' = cols$AD,'fbU_N2E'=cols$AD); lgd_tc=c('fbU_E2N' = 'AD to normal trial','fbU_N2E'='Normal to AD trial')
+lbls_bars = c('norVSexplFB' = 'H1:\nNormal   \n-AD   ','curVSprevFB' = 'H2:\n  Current\n -Previous') # x tick labels for bar plots
+panelEi   = betas2plot$onset_O3_sw %>% filter(var%in%c('fbU_N2E','fbU_E2N')) %>% plot_tcs(.,cols_tc,lgd_tc) + theme(legend.position = c(0.45, 0.1))
+panelEii  = plot_bars(glm_onset_O3_transformed) + geom_text(aes(family='Courier'),x='norVSexplFB',y=1,label='***',size=7) + geom_text(aes(fontface='italic'),x='curVSprevFB', y = 1,label='n.s.',size=5)
+
+# plot together
+ggarrange(panelEi,'',panelEii,nrow=1,ncol=3,widths = c(2.2,0.1,1.3))
+# save
+#ggsave(file.path(path$figs,'Fig06','Fig06E.jpg'),width = 16,height=8,units = 'cm')
+#ggsave(file.path(path$figs,'Fig06','Fig06E.svg'),width = 16,height=8,units = 'cm')
+```
+
+
+Stats for bar plot
+```{r,fig.height=3,fig.width=5}
+# t-test against 0
+t.test(glm_onset_O3_transformed %>% filter(regressor=='norVSexplFB') %>% pull(beta_estimate)) # outcome, normal - expl.
+t.test(glm_onset_O3_transformed %>% filter(regressor=='curVSprevFB') %>% pull(beta_estimate)) # outcome, current - previous
+```
+One Sample t-test
+
+data:  glm_onset_O3_transformed %>% filter(regressor == "norVSexplFB") %>% pull(beta_estimate)
+t = 3.7665, df = 30, p-value = 0.0007223
+alternative hypothesis: true mean is not equal to 0
+95 percent confidence interval:
+0.1024271 0.3450636
+sample estimates:
+mean of x 
+0.2237453 
+
+
+One Sample t-test
+
+data:  glm_onset_O3_transformed %>% filter(regressor == "curVSprevFB") %>% pull(beta_estimate)
+t = 0.060561, df = 30, p-value = 0.9521
+alternative hypothesis: true mean is not equal to 0
+95 percent confidence interval:
+-0.07235453  0.07677686
+sample estimates:
+mean of x 
+0.002211163 
+
+### Panel F: inverse self
+Inverse self during switch trials
+
+Plot timecourses
+```{r,fig.width=11,fig.height=3}
+plot_tcs = function(what2plot,cls,lbl) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25,show.legend=F) + geom_line(aes(y=beta_mu,color=var,linetype=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill'),labels=lbl) + scale_linetype(labels=lbl) + ylab('SMG beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=13),legend.title = element_blank(),legend.direction = 'vertical',legend.background = element_blank(),legend.key.size = unit(0.5, "cm")) 
+}
+
+# TIMECOURSES
+## inverse self
+cols_invs = c('invself_sw'=cols$Self); lgd_invs=c('invself_sw' = 'Inverse Self')
+betas2plot$onset_O3_sw   %>% filter(var%in%c('invself_sw'))        %>% plot_tcs(.,cols_invs,lgd_invs) + theme(legend.position='none')
+
+# save
+#ggsave(file.path(path$figs,'Fig06','Fig06F.jpg'),width = 10,height=8,units = 'cm')
+#ggsave(file.path(path$figs,'Fig06','Fig06F.svg'),width = 10,height=8,units = 'cm')
+```
+
+
+## Supplementary Figure 14 - area 7
+
+Get data
+```{r}
+roi2plot = 'area7_left_513168'
+
+# put betas of all events of interest in one big variable
+betas2plot.area7 = load_tc2plot(regnames,roi2plot,allBeta) 
+
+# Put data together for bar plots
+eoi4bar  = 'onset_O3_sw'
+file4bar = file.path(path$gitlab,'mri-data/roi-time-courses/') %>% paste0(.,'roi02c_stats_glm001_',eoi4bar,'_4to10_subpeaks.xlsx')
+glm_onset_O3_transformed.area7 = rbind(readxl::read_xlsx(file4bar,sheet=1,.name_repair = 'minimal'), readxl::read_xlsx(file4bar,sheet=2,.name_repair = 'minimal')) %>%
+  subset(., select = which(!duplicated(names(.)))) %>% select(all_of(roi2plot),ID,REG) %>% 
+  pivot_wider(id_cols='ID',names_from = 'REG',values_from=all_of(roi2plot)) %>%
+  mutate(curVSprevFB = (fbU_E2N - fbU_N2E)/2,  norVSexplFB = (fbU_E2N + fbU_N2E)/2) %>%
+  pivot_longer(cols=c('curVSprevFB','norVSexplFB'),names_to='regressor',values_to='beta_estimate') 
+```
+
+```{r}
+# functions for plotting
+plot_tcs = function(what2plot,cls,lbl) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25,show.legend = F) + geom_line(aes(y=beta_mu,color=var,linetype=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill'),labels=lbl) + scale_linetype(labels=lbl) + ylab('area 7 beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=10),legend.title = element_blank(),legend.direction = 'vertical',legend.background = element_blank(),legend.key.size = unit(0.5, "cm")) 
+}
+plot_bars = function(what2plot,lbls) {
+  what2plot %>% ggbarplot(.,'regressor','beta_estimate',add=c('mean_se','jitter'),position = position_dodge(0.75),add.params=list(size='regressor',alpha=0.1,show.legend=F),fill=cols$ADL) + 
+    geom_hline(yintercept = 0) + scale_x_discrete(limits=c('norVSexplFB','curVSprevFB'),labels=lbls_bars) + scale_size_manual(values=c(1,1)) + ylab('area 7 beta weights') + xlab(element_blank()) + 
+    theme_pubr(base_size = 14) + theme(panel.background = element_rect(fill='transparent'),plot.background = element_rect(fill='transparent', color=NA))
+}
+
+# PLOT
+# control
+cols_ctrlN = c('ctrlN_p3_all' = cols$Control); lgd_ctrlN  = c('ctrlN_p3_all'='Control')
+cols_ctrlU = c('ctrlU_p3_all' = cols$Control); lgd_ctrlU=c('ctrlU_p3_all'= 'Control update')
+panelAi  = betas2plot.area7$onset_O3 %>% filter(var%in%c('ctrlN_p3_all')) %>% plot_tcs(.,cols_ctrlN,lgd_ctrlN) + theme(legend.position='none') + ylim(-0.1,0.1) + ggtitle('Control')
+panelAii = betas2plot.area7$onset_O3 %>% filter(var%in%c('ctrlU_p3_all')) %>% plot_tcs(.,cols_ctrlU,lgd_ctrlU) + scale_linetype_manual(values = 17,labels=lgd_ctrlU) + theme(legend.position='none')+ ggtitle('Control update')
+
+# feedback difference
+cols_tc   = c('fbU_E2N' = cols$AD,'fbU_N2E'=cols$AD); lgd_tc    = c('fbU_E2N' = 'AD to normal trial','fbU_N2E'='Normal to AD trial')
+lbls_bars = c('norVSexplFB' = 'H1:\nNormal   \n-AD   ','curVSprevFB' = 'H2:\n  Current\n -Previous') # x tick labels for bar plots
+panelBi  = betas2plot.area7$onset_O3_sw %>% filter(var%in%c('fbU_N2E','fbU_E2N')) %>% plot_tcs(.,cols_tc,lgd_tc) + theme(legend.position = c(0.7, 0.9)) + ylim(-0.4,0.45) + ggtitle('Feedback difference')
+panelBii = plot_bars(glm_onset_O3_transformed.area7) + ggtitle('') # geom_text(aes(fontface='italic'),x='curVSprevFB', y = 0.8,label='n.s.',size=5) + geom_text(aes(fontface='italic'),x='norVSexplFB', y = 0.8,label='n.s.',size=5)
+
+# inverse self
+cols_invs = c('invself_sw'=cols$Self); lgd_invs=c('invself_sw' = 'Inverse Self')
+panelC    = betas2plot.area7$onset_O3_sw %>% filter(var%in%c('invself_sw')) %>% plot_tcs(.,cols_invs,lgd_invs) + theme(legend.position='none') + ggtitle('Inverse self')
+
+# plot together
+ggarrange(panelAi,panelAii,'',panelBi,ggarrange(panelBii,'',widths = c(0.8,0.2)),panelC,nrow=2,ncol=3)
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_glm001_area7_raw.jpg'),width = 25,height=16,units = 'cm') 
+```
+
+```{r}
+# t-test against 0
+t.test(glm_onset_O3_transformed.area7 %>% filter(regressor=='norVSexplFB') %>% pull(beta_estimate)) # outcome, normal - expl.
+t.test(glm_onset_O3_transformed.area7 %>% filter(regressor=='curVSprevFB') %>% pull(beta_estimate)) # outcome, current - previous
+```
+One Sample t-test
+
+data:  glm_onset_O3_transformed.area7 %>% filter(regressor == "norVSexplFB") %>% pull(beta_estimate)
+t = -1.4807, df = 30, p-value = 0.1491
+alternative hypothesis: true mean is not equal to 0
+95 percent confidence interval:
+-0.19471647  0.03103807
+sample estimates:
+mean of x 
+-0.0818392 
+
+
+One Sample t-test
+
+data:  glm_onset_O3_transformed.area7 %>% filter(regressor == "curVSprevFB") %>% pull(beta_estimate)
+t = 1.8307, df = 30, p-value = 0.0771
+alternative hypothesis: true mean is not equal to 0
+95 percent confidence interval:
+-0.0118498  0.2169149
+sample estimates:
+mean of x 
+0.1025326 
+
+# GLM group 002
+
+Put data together for timecourse plots
+```{r}
+roi2plot = 'SMG_left_centr_765154'
+
+# betas from the timecourse script
+allBeta = rmatio::read.mat(file.path(path$gitlab,'mri-data/roi-time-courses','roi02b_tc_glm002_allBeta.mat'))$allBeta
+
+# reg names just copied from matlab
+regnames = list(
+  onset_O1_PT    = c('PE_self','constant'),
+  onset_O1_PTi   = c('PE_other','constant'),
+  onset_O1_PTii  = c('ctrl_p1_PT','PE_p1_PT','constant'),
+  onset_O1_PTiii = c('PE_self','PE_other','constant')
+)
+# colors
+cols_tc = c('ctrl_p1_PT'=cols$Control,'PE_self'=cols$Self,'PE_other'=cols$Other,'PE_p1_PT'='black')
+
+# put betas of all events of interest in one big variable
+betas2plot = load_tc2plot(regnames,roi2plot,allBeta) 
+```
+
+## Figure 7 - SMG
+```{r}
+# functions for plotting
+plot_tcs = function(what2plot,cls) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25) + geom_line(aes(y=beta_mu,color=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill')) + ylab('SMG beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=14),legend.position='none',legend.title = element_blank(),legend.direction = 'vertical') 
+}
+
+# TIMECOURSES
+panel7A = betas2plot$onset_O1_PT %>% filter(var%in%c('PE_self')) %>% plot_tcs(.,cols_tc); 
+panel7B = betas2plot$onset_O1_PTi %>% filter(var%in%c('PE_other')) %>% plot_tcs(.,cols_tc);
+panel7C = betas2plot$onset_O1_PTii %>% filter(var%in%c('PE_p1_PT')) %>% plot_tcs(.,cols_tc) + ylim(-0.09,0.09)
+
+ggarrange(panel7A,panel7B,panel7C,ncol=3)
+# save
+#ggsave(file.path(path$figs,'Fig07','Fig07ABC.jpg'),width = 30,height=8,units = 'cm') 
+#ggsave(file.path(path$figs,'Fig07','Fig07ABC.svg'),width = 30,height=8,units = 'cm') 
+```
+
+## Supplementary Figure 15 - SMG
+```{r}
+# functions for plotting
+plot_tcs = function(what2plot,cls) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25) + geom_line(aes(y=beta_mu,color=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill')) + ylab('SMG beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=14),legend.position='none',legend.title = element_blank(),legend.direction = 'vertical') 
+}
+
+# TIMECOURSES
+panelXAi  = betas2plot$onset_O1_PTiii %>% filter(var%in%c('PE_self')) %>% plot_tcs(.,cols_tc) + ylim(-0.15,0.18) + ggtitle('sPE - outcome phase')
+panelXAii = betas2plot$onset_O1_PTiii %>% filter(var%in%c('PE_other')) %>% plot_tcs(.,cols_tc) + ylim(-0.15,0.18) + ggtitle('oPE - outcome phase')
+
+## tPE and control in outcome phase, m3
+panelXB = betas2plot$onset_O1_PTii %>% filter(var%in%c('ctrl_p1_PT')) %>% plot_tcs(.,cols_tc) +  ylim(-0.15,0.15) + ggtitle('Control - outcome phase')
+
+ggarrange(panelXAi,panelXAii,panelXB,ncol=3)
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_glm002_m3-m4_raw.jpg'),width = 30,height=8,units = 'cm') 
+```
+
+## Supplementary figure 16 - area 7
+
+Load
+```{r}
+roi2plot = 'area7_left_513168'
+
+# put betas of all events of interest in one big variable
+betas2plot.area7 = load_tc2plot(regnames,roi2plot,allBeta) 
+```
+
+Plot
+```{r}
+# functions for plotting
+plot_tcs = function(what2plot,cls) {
+  # plot timecourses
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25) + geom_line(aes(y=beta_mu,color=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill')) + ylab('area 7 beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=14),legend.position='none',legend.title = element_blank(),legend.direction = 'vertical') 
+}
+
+# TIMECOURSES
+lims=c(-0.15,0.15)
+## Panel A: separate GLMs
+panelXAi  = betas2plot.area7$onset_O1_PT %>% filter(var%in%c('PE_self')) %>% plot_tcs(.,cols_tc)+ylim(lims)
+panelXAii = betas2plot.area7$onset_O1_PTi %>% filter(var%in%c('PE_other')) %>% plot_tcs(.,cols_tc)+ylim(lims) 
+
+## Panel B: sPE + oPE in one GLM
+panelXBi  = betas2plot.area7$onset_O1_PTiii %>% filter(var%in%c('PE_self')) %>% plot_tcs(.,cols_tc) + ylim(lims)
+panelXBii = betas2plot.area7$onset_O1_PTiii %>% filter(var%in%c('PE_other')) %>% plot_tcs(.,cols_tc) + ylim(lims)
+
+## tPE and control in outcome phase
+panelXCi  = betas2plot.area7$onset_O1_PTii %>% filter(var%in%c('PE_p1_PT')) %>% plot_tcs(.,cols_tc)  + ylim(lims)
+panelXCii = betas2plot.area7$onset_O1_PTii %>% filter(var%in%c('ctrl_p1_PT')) %>% plot_tcs(.,cols_tc)  + ylim(lims)
+
+# plot and save
+ggarrange(ggarrange(panelXAi,panelXAii) %>% annotate_figure(top=text_grob(' ',size=16,just='right')),
+          ggarrange(panelXBi,panelXBii) %>% annotate_figure(top=text_grob(' ',size=16,just='right')),
+          ggarrange(panelXCi,panelXCii) %>% annotate_figure(top=text_grob(' ',size=16,just='right')),nrow=3)
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_glm002_m3-m4_area7_raw.jpg'),width = 20,height=24,units = 'cm')
+```
+
+# GLM group 003
+
+Put data together for timecourse plots
+```{r}
+roi2plot = 'NAc_bil'
+
+# betas from the timecourse script
+allBeta = rmatio::read.mat(file.path(path$gitlab,'mri-data/roi-time-courses','roi02b_tc_glm003_allBeta.mat'))$allBeta
+# reg names just copied from matlab
+regnames = list(
+  onset_O13_PTstay  = c('fbU_p13_PTstay','fb_PTstay','constant')
+)
+
+# put betas of all events of interest in one big variable
+betas2plot.NAcc = load_tc2plot(regnames,roi2plot,allBeta) 
+```
+
+## Supplementary Figure 17 - nucleus accumbens
+```{r}
+plot_tcs = function(what2plot,cls) {
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25) + geom_line(aes(y=beta_mu,color=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill')) + ylab('Nucleus accumbens beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=14),legend.position='none',legend.title = element_blank(),legend.direction = 'vertical') 
+}
+# plot
+panelXAi  = betas2plot.NAcc$onset_O13_PTstay %>% filter(var%in%c('fb_PTstay')) %>% plot_tcs(.,c('fb_PTstay'='black')) + ggtitle('Feedback - outcome phase')
+panelXAii = betas2plot.NAcc$onset_O13_PTstay %>% filter(var%in%c('fbU_p13_PTstay')) %>% plot_tcs(.,c('fbU_p13_PTstay'='black')) + ggtitle('Feedback change - outcome phase')
+
+ggarrange(panelXAi,panelXAii,ncol=2)
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_glm003_raw.jpg'),width = 25,height=10,units = 'cm')
+```
+
+# GLM group 004
+
+load glm data
+```{r}
+# betas from the timecourse script
+allBeta = rmatio::read.mat(file.path(path$gitlab,'mri-data/roi-time-courses','roi02b_tc_glm004_allBeta.mat'))$allBeta
+# reg names just copied from matlab
+regnames = list(
+  onset_A1   = c('unc_other_p1','unc_self_p1','AT_p1', 'phase_trial','switch_p1', 'RT_A1', 'gameR_p1','gameL_p1','gameS_p1','constant'),
+  onset_A3   = c('unc_other_p3','unc_ctrl_p3','AT_p3', 'phase_trial','switch_p3', 'RT_A3', 'gameR_p3','gameL_p3','gameS_p3','constant'),
+  onset_A3i  = c('unc_other_p3',              'AT_p3','switch_p3', 'RT_A3', 'gameR_p3','gameL_p3','gameS_p3','constant'),
+  onset_A3ii = c('unc_ctrl_p3',               'AT_p3','switch_p3', 'RT_A3', 'gameR_p3','gameL_p3','gameS_p3', 'constant'),
+  onset_A13   = c('unc_avg_p13',               'AT_p13','trial',      'switch_p13','RT_A13','gameR',   'gameL',   'gameS',   'constant')
+)
+
+# put betas of all events of interest in one big variable
+betas2plot = load_tc2plot(regnames,roi2plot = 'SMG_left_centr_765154',allBeta) 
+betas2plot.area7 = load_tc2plot(regnames,roi2plot = 'area7_left_513168',allBeta) 
+```
+
+## Supplementary Figure 18 - SMG
+```{r}
+plot_tcs = function(what2plot,cls,lbl) {
+  what2plot %>% ggplot(aes(x=time,group=var)) + geom_hline(yintercept=0) + geom_vline(xintercept=0) +
+    geom_ribbon(aes(ymin=beta_seL,ymax=beta_seH,fill=var),alpha=0.25,show.legend=F) + geom_line(aes(y=beta_mu,color=var,linetype=var),size=1) + 
+    scale_x_continuous(limits=c(-2,15),expand=c(0,0)) + scale_color_manual(values=cls,aesthetics = c('color','fill'),labels=lbl) + scale_linetype(labels=lbl) + ylab('SMG beta weights') + xlab('Time (s)') + 
+    theme_pubr(base_size = 14) + theme(legend.text = ggtext::element_markdown(size=13),legend.title = element_blank(),legend.direction = 'vertical',legend.background = element_blank(),legend.key.size = unit(0.5, "cm")) 
+}
+
+# SMG PLOT
+cols_unc = c('unc_avg_p13' = 'black');lgd_unc = c('unc_avg_p13' = 'Uncertainty')
+cols_AD = c('AT_p13' = cols$AD); lgd_AD = c('AT_p13' = 'AD')
+cols_ctrl = c('unc_ctrl_p3' = cols$Control); lgd_ctrl  = c('unc_ctrl_p3'='Control')
+cols_other = c('unc_other_p3' = cols$Other,'unc_other_p1' = cols$Other); lgd_other = c('unc_other_p3'='Other','unc_other_p1'='Other')
+cols_self = c('unc_self_p1' = cols$Self); lgd_self  = c('unc_self_p1'='Self')
+panelAi  = betas2plot$onset_A13   %>% filter(var%in%c('unc_avg_p13')) %>% plot_tcs(.,cols_unc,lgd_unc) + theme(legend.position='none') + ggtitle('Uncertainty')
+panelAii = betas2plot$onset_A13   %>% filter(var%in%c('AT_p13')) %>% plot_tcs(.,cols_AD,lgd_AD) + theme(legend.position='none') + ggtitle('AD')
+panelBi  = betas2plot$onset_A3ii %>% filter(var%in%c('unc_ctrl_p3'))  %>% plot_tcs(.,cols_ctrl,lgd_ctrl) + theme(legend.position='none') + ggtitle('Control uncertainty')
+panelBii = betas2plot$onset_A3i  %>% filter(var%in%c('unc_other_p3')) %>% plot_tcs(.,cols_other,lgd_other) + theme(legend.position='none') + ggtitle('Other uncertainty')
+panelCi  = betas2plot$onset_A3   %>% filter(var%in%c('unc_ctrl_p3'))  %>% plot_tcs(.,cols_ctrl,lgd_ctrl) + theme(legend.position='none') + ggtitle('Control uncertainty')
+panelCii = betas2plot$onset_A3   %>% filter(var%in%c('unc_other_p3')) %>% plot_tcs(.,cols_other,lgd_other) + theme(legend.position='none') + ggtitle('Other uncertainty')
+panelDi  = betas2plot$onset_A1   %>% filter(var%in%c('unc_self_p1'))  %>% plot_tcs(.,cols_self,lgd_self) + theme(legend.position='none') + ggtitle('Self uncertainty')
+panelDii = betas2plot$onset_A1   %>% filter(var%in%c('unc_other_p1')) %>% plot_tcs(.,cols_other,lgd_other) + theme(legend.position='none') + ggtitle('Other uncertainty')
+# plot together
+ggarrange(panelAi,panelBi,panelCi,panelDi,panelAii,panelBii,panelCii,panelDii,ncol=4,nrow=2,align='hv')
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_glm004_smg_raw.jpg'),width = 32,height=14,units = 'cm')
+```
+
+## Supplementary Figure 19 - area 7
+```{r}
+panelAi.a7  = betas2plot.area7$onset_A13   %>% filter(var%in%c('unc_avg_p13')) %>% plot_tcs(.,cols_unc,lgd_unc) + theme(legend.position='none') + ggtitle('Uncertainty') + ylab('area 7 beta weights')
+panelAii.a7 = betas2plot.area7$onset_A13   %>% filter(var%in%c('AT_p13')) %>% plot_tcs(.,cols_AD,lgd_AD) + theme(legend.position='none') + ggtitle('AD')  + ylab('area 7 beta weights')
+panelBi.a7  = betas2plot.area7$onset_A3ii %>% filter(var%in%c('unc_ctrl_p3'))  %>% plot_tcs(.,cols_ctrl,lgd_ctrl) + theme(legend.position='none') + ggtitle('Control uncertainty') + ylab('area 7 beta weights')
+panelBii.a7 = betas2plot.area7$onset_A3i  %>% filter(var%in%c('unc_other_p3')) %>% plot_tcs(.,cols_other,lgd_other) + theme(legend.position='none') + ggtitle('Other uncertainty') + ylab('area 7 beta weights')
+panelCi.a7  = betas2plot.area7$onset_A3   %>% filter(var%in%c('unc_ctrl_p3'))  %>% plot_tcs(.,cols_ctrl,lgd_ctrl) + theme(legend.position='none') + ggtitle('Control uncertainty') + ylab('area 7 beta weights')
+panelCii.a7 = betas2plot.area7$onset_A3   %>% filter(var%in%c('unc_other_p3')) %>% plot_tcs(.,cols_other,lgd_other) + theme(legend.position='none') + ggtitle('Other uncertainty') + ylab('area 7 beta weights')
+panelDi.a7  = betas2plot.area7$onset_A1   %>% filter(var%in%c('unc_self_p1'))  %>% plot_tcs(.,cols_self,lgd_self) + theme(legend.position='none') + ggtitle('Self uncertainty') + ylab('area 7 beta weights')
+panelDii.a7 = betas2plot.area7$onset_A1   %>% filter(var%in%c('unc_other_p1')) %>% plot_tcs(.,cols_other,lgd_other) + theme(legend.position='none') + ggtitle('Other uncertainty') + ylab('area 7 beta weights')
+# plot together
+ggarrange(panelAi.a7,panelBi.a7,panelCi.a7,panelDi.a7,panelAii.a7,panelBii.a7,panelCii.a7,panelDii.a7,ncol=4,nrow=2,align='hv')
+#ggsave(file.path(path$figs,'Supplementals','FigX_timecourse_glm004_area7_raw.jpg'),width = 32,height=14,units = 'cm')
+```
