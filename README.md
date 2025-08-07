@@ -26,11 +26,11 @@ Then install the required R packages (see R-packages.txt) using the `install.pac
 The analysis folder contains the scripts necessary to analyse the behavioura and neural data provided, and reproduce the plots of the study.
 
 - `_functions` : contains custom R functions used for the analysis
+  - `setup_cc.R`: setup the analysis environment, load the required packages and data. change the paths here to run the analyses and plotting scripts
   - `fit_sub_behaviour.R`: fit subject-wise regressions using brms
   - `load_data4regs.R`: load the preprocessed behavioural data to run regression analyses and for plotting
   - `load_learners.R`: load the simulated data from the three Bayesian optimal observer models and aggregate with the behavioural data
   - `load_tc2plot.R`: load the time course data for plotting the fMRI time courses
-  - `setup_cc.R`: setup the analysis environment, load the required packages and data
   - `transform_data_l1.R`: transform the behavioural data in a long format for the fMRI time course analyses
 - `behaviour`: contains analysis and plotting script for the behavioural results
   - `BayesianModel_phase1.stan` and `BayesianModel_phase3.stan`: the stan files that specify the Bayesian learner models (phase1 = Self-Other phase, phase3 = Control-Other phase).
