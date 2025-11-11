@@ -13,7 +13,7 @@ learners2fitall = c('BL','IL','PL') # BL = Active learner, IL = Ignorant learner
 sample2fitall   = c('mri','online')
 phase2fitall    = c(1,3)        # 1 or 3, or both; 1 = Self-Other phase, 3 = Control-Other phase
 sd2fit          = 30 # initial SD = uncertainty
-max.tries       = 3
+max.tries       = 10 # how often to try to fit if not converged (will increase e.g. number of iterations) - increase this number if model didn't converge or fitting was not successful
 last_pre_drift_trial = 11 # trial number that is the last one pre-drift
 
 ### Source  functions ###
