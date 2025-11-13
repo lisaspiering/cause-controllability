@@ -90,7 +90,7 @@ dataB4roi = dataB.mri.4roi %>%
 
 # normalise data
 vars2scale    = list(
-  byphase     = c('invself_sw','fbU_N2E','fbU_E2N','ctrlN_p3_all','AT_p3_onswonly'),
+  byphase     = c('invself_sw','fbU_N2E','fbU_E2N','ctrlN_p3_all','ctrlU_p3_all','AT_p3_onswonly'),
   acrossphase = c()
 )
 dataB4roiZ = dataB4roi %>% 
