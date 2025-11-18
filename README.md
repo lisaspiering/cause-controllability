@@ -1,4 +1,4 @@
-# controllability and cause in human collaboration
+# Active disambiguation guides inferring controllability and cause in social interactions
 
 Spiering et al., 2024.
 bioRxiv preprint available at: https://www.biorxiv.org/content/10.1101/2024.10.01.615833v1
