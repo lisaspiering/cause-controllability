@@ -1,6 +1,7 @@
 # Active disambiguation guides inferring controllability and cause in social interactions
 
-Spiering et al., 2024.
+Spiering et al., Nature Communications, 2025
+Link to paper: https://www.nature.com/articles/s41467-025-67853-8
 bioRxiv preprint available at: https://www.biorxiv.org/content/10.1101/2024.10.01.615833v1
 
 This repository contains data, analysis script and plotting scripts for the above project. Please refer to above preprint for details on the project. Each script contains comments on how to use the script and which figures or analyses it produces. For any questions, please refer to above preprint or contact the authors.
